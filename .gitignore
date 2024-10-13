@@ -1,15 +1,39 @@
-# Ignore the virtual environment directory
+# Ignore Python virtual environment
 env/
-
-# Ignore Python build and cache files
+*.pyc
 __pycache__/
-*.py[cod]
 
-# Ignore Jupyter Notebook checkpoints
-.ipynb_checkpoints/
+# Ignore compiled Python installation directory
+Python-3.9.9/
+
+# Ignore binaries and executables from sra-toolkit
+data/sra-toolkit/bin/
+
+# Ignore downloaded reference genomes (fasta, annotation, etc.)
+data/reference_genome/*.fna
+data/reference_genome/*.gbff
+data/reference_genome/*.faa
+data/reference_genome/*.gff
+data/reference_genome/*.txt
+data/reference_genome/*.json
+data/reference_genome/*.zip
+# Ignore all sra-toolkit files
+data/sra-toolkit/*
+# Ignore reference genome metadata files (json, txt)
+data/reference_genome/*.json
+data/reference_genome/*.txt
+
+# Ignore large data files (raw/processed)
+data/raw/
+data/processed/
 
 # Ignore environment configuration files
 .env
 
-# Ignore compiled Python installation directory
-Python-3.9.9/
+# Ignore IDE/editor config files
+.vscode/
+.idea/
+
+# Ignore OS-generated files
+.DS_Store
+Thumbs.db
