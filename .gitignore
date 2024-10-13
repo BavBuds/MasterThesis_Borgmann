@@ -1,3 +1,15 @@
-MTB/
+# Ignore the virtual environment directory
+env/
 
+# Ignore Python build and cache files
+__pycache__/
+*.py[cod]
+
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Ignore environment configuration files
 .env
+
+# Ignore compiled Python installation directory
+Python-3.9.9/
