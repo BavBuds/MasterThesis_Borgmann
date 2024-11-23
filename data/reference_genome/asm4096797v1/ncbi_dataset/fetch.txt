@@ -1,1 +1,0 @@
-https://api.ncbi.nlm.nih.gov/datasets/fetch_h/R2V0UmVtb3RlRGF0YWZpbGU/eNqTKuTKz0tOytROKymw0tdPT83Lz00t1k_MydF3d3bUNzAx0Lc0M9e3NDcF8eOBfCAXyNMzjHcM9oXyygzxSsaDTc1M1kvLS9RLrzJgtGAEAMTOIHc	0	data/GCA_040967975.1/GCA_040967975.1_ASM4096797v1_genomic.fna

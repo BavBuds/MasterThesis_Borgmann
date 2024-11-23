@@ -1,39 +1,89 @@
-# Ignore Python virtual environment
-env/
-*.pyc
-__pycache__/
-
-# Ignore compiled Python installation directory
-Python-3.9.9/
-
-# Ignore binaries and executables from sra-toolkit
-data/sra-toolkit/bin/
-
-# Ignore downloaded reference genomes (fasta, annotation, etc.)
-data/reference_genome/*.fna
-data/reference_genome/*.gbff
-data/reference_genome/*.faa
-data/reference_genome/*.gff
-data/reference_genome/*.txt
-data/reference_genome/*.json
-data/reference_genome/*.zip
-# Ignore all sra-toolkit files
-data/sra-toolkit/*
-# Ignore reference genome metadata files (json, txt)
-data/reference_genome/*.json
-data/reference_genome/*.txt
-
-# Ignore large data files (raw/processed)
+# Data directories
 data/raw/
 data/processed/
+data/sra-toolkit/
 
-# Ignore environment configuration files
-.env
+# Keep only processed data structure as it might contain analysis results
+!data/processed/.gitkeep
 
-# Ignore IDE/editor config files
+# Python environments
+env/
+Python-3.9.9/
+venv/
+.env/
+.venv/
+
+# Project specific files
+*.md5sum.txt
+fetch.txt
+assembly_data_report.json
+dataset_catalog.json
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+*.so
+
+# Genomic data files
+*.fasta
+*.fastq
+*.bam
+*.sam
+*.gz
+*.sra
+
+# VSCode
 .vscode/
-.idea/
+.vscode-server/
+*.code-workspace
 
-# Ignore OS-generated files
+# IDE settings
+.idea/
+*.iml
+*.iws
+.idea_modules/
+
+# System files
 .DS_Store
 Thumbs.db
+.Xauthority
+.bash_history
+.bash_profile
+.bashrc
+.cache/
+.config/
+.dotnet/
+.esd_auth
+.gitconfig
+.ncbi/
+.ssh/
+.wget-hsts
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# Large files and datasets
+*.csv
+*.tsv
+*.pkl
+*.h5
+
+# Logs
+*.log
+logs/
+
+.env 
+.gitignore
