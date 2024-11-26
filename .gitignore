@@ -1,89 +1,65 @@
-# Data directories
-data/raw/
-data/processed/
-data/sra-toolkit/
+# Additional assembly and QC files
+*.contig
+*.scaf
+*.scaffold
+*.preArc
+*.vertex
+*.edge
+*.links
+*.peGrads
+*.readInGap
+*.scaf_gap
+*.bubbleInScaff
+*.Arc
+*.kmerFreq
+*.gapclosed.*
+*.config
 
-# Keep only processed data structure as it might contain analysis results
-!data/processed/.gitkeep
+# BUSCO specific
+*/busco_downloads/
+*/busco_results/
+short_summary.*
+full_table.*
+missing_busco_list.*
+busco_sequences/
 
-# Python environments
-env/
-Python-3.9.9/
-venv/
-.env/
-.venv/
+# QUAST specific
+quast_results/
+*/aligned_stats/
+*/basic_stats/
+*/icarus_viewers/
+*.pdf
+*.html
+*.tex
+icarus.css
+report.*
+transposed_report.*
 
-# Project specific files
-*.md5sum.txt
-fetch.txt
-assembly_data_report.json
-dataset_catalog.json
+# Additional genomics formats
+*.fna
+*.faa
+*.ffn
+*.gff
+*.gbk
+*.gb
+*.embl
+*.qual
 
-# Python cache files
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-*.so
+# Additional bioinformatics output
+*.contigs
+*.scaffolds
+*.assembly
+*.consensus
+*.mapping
 
-# Genomic data files
-*.fasta
-*.fastq
-*.bam
-*.sam
-*.gz
-*.sra
+# Directory structures (but keep .gitkeep)
+data/**/*
+!data/**/*/
+!data/**/.gitkeep
 
-# VSCode
-.vscode/
-.vscode-server/
-*.code-workspace
-
-# IDE settings
-.idea/
-*.iml
-*.iws
-.idea_modules/
-
-# System files
-.DS_Store
-Thumbs.db
-.Xauthority
-.bash_history
-.bash_profile
-.bashrc
-.cache/
-.config/
-.dotnet/
-.esd_auth
-.gitconfig
-.ncbi/
-.ssh/
-.wget-hsts
-
-# Distribution / packaging
-dist/
-build/
-*.egg-info/
-*.egg
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*/.ipynb_checkpoints/*
-
-# Large files and datasets
-*.csv
-*.tsv
-*.pkl
-*.h5
-
-# Logs
-*.log
-logs/
-
-.env 
-.gitignore
+# Additional system files
+.local/
+.conda/
+.parallel/
+.python_history
+.lesshst

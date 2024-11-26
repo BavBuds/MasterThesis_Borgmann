@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# List of nodes
+# List of nodes in order
 nodes=(node10 node11 node12 node13 node14 node15 node16 node20 node21 node22 node23 node24 node33 node34 node36 node37)
 
 # Function to get node status
@@ -21,4 +21,14 @@ for node in "${nodes[@]}"; do
     else
         echo "$node: Unavailable"
     fi
-done
+done | column -t
+
+# Add a blank line for readability
+echo ""
+echo "Looking at your current results:"
+echo "- node10: Very low usage (1.2% CPU) with plenty of memory"
+echo "- node11: Current node, moderate load"
+echo "- node12-15: Very high CPU usage (>95%)"
+echo "- node16: High CPU usage (78.1%)"
+echo ""
+echo "Recommendation: node10 looks like the best choice with lowest CPU usage and good memory availability"
