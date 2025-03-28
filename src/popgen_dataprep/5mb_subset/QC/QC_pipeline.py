@@ -57,27 +57,28 @@ logger.info(f"📂 Base directory: {BASE_DIR}")
 
 # Define input files
 samples = {
-    "HT": {  # Long-read Nanopore (ONT dataset candidate)
-        "assembly": os.path.join(BASE_DIR, "HT_assembly_5mb_subset.fasta"),
+    "HT": {
+        "assembly": os.path.join(BASE_DIR, "HT", "HT_assembly_5mb_subset.fasta"),
         "reads": "/data/proj2/home/students/m.borgmann/Master_thesis/data/raw/Reference_data/WGS_projects/Hexaplex_trunculus_nanopore/20241217_DNA_Tellier_HT_31_PB/20241217_1155_2A_PAY72199_a0bfda36/fastq_pass/*.fastq.gz",
         "mapper": "minimap2",
         "data_type": "ONT"
     },
-    "HT2": {  # Short-read Illumina
-        "assembly": os.path.join(BASE_DIR, "HT2_assembly_5mb_subset.fasta"),
+    "HT2": {
+        "assembly": os.path.join(BASE_DIR, "HT2", "HT2_assembly_5mb_subset.fasta"),
         "reads_1": "/data/proj2/home/students/m.borgmann/Master_thesis/data/raw/Reference_data/WGS_projects/PRJNA1106542_Hexaplex_trunculus/SRR28865916/SRR28865916_R1.fastq",
         "reads_2": "/data/proj2/home/students/m.borgmann/Master_thesis/data/raw/Reference_data/WGS_projects/PRJNA1106542_Hexaplex_trunculus/SRR28865916/SRR28865916_R2.fastq",
         "mapper": "bwa-mem2",
         "data_type": "ILLUMINA"
     },
-    "BB": {  # Short-read Illumina
-        "assembly": os.path.join(BASE_DIR, "BB_assembly_5mb_subset.fasta"),
+    "BB": {
+        "assembly": os.path.join(BASE_DIR, "BB", "BB_assembly_5mb_subset.fasta"),
         "reads_1": "/data/proj2/home/students/m.borgmann/Master_thesis/data/raw/Reference_data/WGS_projects/PRJNA1106534_Bolinus_brandaris/SRR28863561/SRR28863561_R1.fastq",
         "reads_2": "/data/proj2/home/students/m.borgmann/Master_thesis/data/raw/Reference_data/WGS_projects/PRJNA1106534_Bolinus_brandaris/SRR28863561/SRR28863561_R2.fastq",
         "mapper": "bwa-mem2",
         "data_type": "ILLUMINA"
     },
 }
+
 
 # List available datasets and prompt for ONT datasets
 sample_keys = list(samples.keys())
