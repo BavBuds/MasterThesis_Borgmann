@@ -166,6 +166,26 @@ def compute_heterozygosity_percent(vcf_path, het_count):
         logger.warning(f"No sites found in {vcf_path}, returning 0% heterozygosity")
         return 0
 
+def compute_missing_percent(vcf_path, missing_count):
+    """
+    Calculate the percentage of missing sites = (# missing / total # called sites) * 100.
+    """
+    try:
+        total_sites = int(subprocess.check_output(
+            f"bcftools view -H {vcf_path} | wc -l", shell=True
+        ).strip())
+        logger.debug(f"Total sites in {vcf_path}: {total_sites}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to count total sites in {vcf_path}: {e}")
+        total_sites = 0
+    if total_sites > 0:
+        missing_percent = (missing_count / total_sites) * 100
+        logger.debug(f"Missing percentage calculation: {missing_count}/{total_sites} = {missing_percent:.2f}%")
+        return missing_percent
+    else:
+        logger.warning(f"No sites found in {vcf_path}, returning 0% missing")
+        return 0
+
 def cleanup_bwa_mem2_files(assembly_path):
     """Remove intermediary index files created by bwa-mem2 indexing."""
     logger.info(f"Cleaning up bwa-mem2 index files for {assembly_path}")
@@ -496,7 +516,7 @@ def count_het_and_missing(vcf_path):
 
     logger.debug(f"Counting heterozygous and missing sites in {vcf_path}")
     
-    # Number of lines with a heterozygous genotype
+    # Count heterozygous sites
     try:
         het_count = int(subprocess.check_output(
             f"bcftools view -g het {vcf_path} | wc -l", shell=True
@@ -506,7 +526,7 @@ def count_het_and_missing(vcf_path):
         logger.error(f"Failed to count heterozygous sites: {e}")
         het_count = 0
 
-    # Number of lines with a missing genotype './.'
+    # Count missing sites (genotype './.')
     try:
         missing_count = int(subprocess.check_output(
             f"bcftools query -f '%CHROM\\t%POS\\t[%GT]\\n' {vcf_path} | grep '\\./\\.' | wc -l",
@@ -549,9 +569,10 @@ for sample in samples:
                 "Mean Coverage": 0,
                 "Median Coverage": 0,
                 "% Sites ≥10x Coverage": 0,
-                "Heterozygous Sites": 0,
-                "Heterozygosity (%)": 0,
+                "Het Sites": 0,
+                "Het (%)": 0,
                 "Missing Sites": 0,
+                "Miss (%)": 0,
                 "Status": "Failed - Mapping error"
             }
             continue
@@ -569,9 +590,10 @@ for sample in samples:
                 "Mean Coverage": 0,
                 "Median Coverage": 0,
                 "% Sites ≥10x Coverage": 0,
-                "Heterozygous Sites": 0,
-                "Heterozygosity (%)": 0,
+                "Het Sites": 0,
+                "Het (%)": 0,
                 "Missing Sites": 0,
+                "Miss (%)": 0,
                 "Status": "Failed - Filtering error"
             }
             continue
@@ -589,9 +611,10 @@ for sample in samples:
                 "Mean Coverage": 0,
                 "Median Coverage": 0,
                 "% Sites ≥10x Coverage": 0,
-                "Heterozygous Sites": 0,
-                "Heterozygosity (%)": 0,
+                "Het Sites": 0,
+                "Het (%)": 0,
                 "Missing Sites": 0,
+                "Miss (%)": 0,
                 "Status": "Failed - Sorting error"
             }
             continue
@@ -611,9 +634,9 @@ for sample in samples:
                 # Truncate coverage for QC stats
                 cap = 250 if samples[sample]['data_type'] == 'ILLUMINA' else 500
                 truncated = [min(d, cap) for d in raw_depths]
-                mean_cov = sum(truncated)/len(truncated)
+                mean_cov = sum(truncated) / len(truncated)
                 median_cov = median(truncated)
-                ten_x_sites = (sum(1 for d in truncated if d >= 10)/len(truncated))*100
+                ten_x_sites = (sum(1 for d in truncated if d >= 10) / len(truncated)) * 100
                 logger.info(f"Loaded coverage statistics for {sample} (truncated at {cap}x):")
                 logger.info(f"  - Mean coverage: {mean_cov:.2f}x")
                 logger.info(f"  - Median coverage: {median_cov:.2f}x")
@@ -638,9 +661,10 @@ for sample in samples:
                 "Mean Coverage": mean_cov,
                 "Median Coverage": median_cov,
                 "% Sites ≥10x Coverage": ten_x_sites,
-                "Heterozygous Sites": 0,
-                "Heterozygosity (%)": 0,
+                "Het Sites": 0,
+                "Het (%)": 0,
                 "Missing Sites": 0,
+                "Miss (%)": 0,
                 "Status": "Failed - Variant calling error"
             }
             continue
@@ -658,24 +682,27 @@ for sample in samples:
                 "Mean Coverage": mean_cov,
                 "Median Coverage": median_cov,
                 "% Sites ≥10x Coverage": ten_x_sites,
-                "Heterozygous Sites": 0,
-                "Heterozygosity (%)": 0,
+                "Het Sites": 0,
+                "Het (%)": 0,
                 "Missing Sites": 0,
+                "Miss (%)": 0,
                 "Status": "Failed - VCF filtering error"
             }
             continue
 
-    # 5) Count heterozygous & missing sites
+    # 5) Count heterozygous & missing sites and compute percentages
     het_count, missing_count = count_het_and_missing(filtered_vcf)
     het_percent = compute_heterozygosity_percent(filtered_vcf, het_count)
+    missing_percent = compute_missing_percent(filtered_vcf, missing_count)
 
     results[sample] = {
         "Mean Coverage": mean_cov,
         "Median Coverage": median_cov,
         "% Sites ≥10x Coverage": ten_x_sites,
-        "Heterozygous Sites": het_count,
-        "Heterozygosity (%)": het_percent,
+        "Het Sites": het_count,
+        "Het (%)": het_percent,
         "Missing Sites": missing_count,
+        "Miss (%)": missing_percent,
         "Status": "Completed successfully"
     }
     logger.info(f"✅ Processing completed for sample {sample}")
@@ -700,6 +727,7 @@ header = (
     "Het Sites".rjust(12) +
     "Het (%)".rjust(10) +
     "Missing".rjust(10) +
+    "Miss (%)".rjust(10) +
     "Status".rjust(20)
 )
 separator = "-" * len(header)
@@ -710,9 +738,10 @@ for sample, stats in results.items():
         f"{stats['Mean Coverage']:.2f}".rjust(10) +
         f"{stats['Median Coverage']:.2f}".rjust(12) +
         f"{stats['% Sites ≥10x Coverage']:.2f}".rjust(10) +
-        f"{stats['Heterozygous Sites']}".rjust(12) +
-        f"{stats['Heterozygosity (%)']:.2f}".rjust(10) +
+        f"{stats['Het Sites']}".rjust(12) +
+        f"{stats['Het (%)']:.2f}".rjust(10) +
         f"{stats['Missing Sites']}".rjust(10) +
+        f"{stats['Miss (%)']:.2f}".rjust(10) +
         f"{stats.get('Status', 'Completed')}".rjust(20)
     )
     report_lines.append(line)
