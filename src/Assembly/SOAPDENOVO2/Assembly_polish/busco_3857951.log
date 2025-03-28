@@ -1,0 +1,24 @@
+2024-12-04 15:10:06 DEBUG:busco.run_BUSCO	Command line: /data/proj2/home/students/m.borgmann/miniforge3/envs/master_thesis/bin/busco -i /data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Bolinus_SOAP/k63_polish/Bolinus_k63_polished/Bolinus_k63_polished.fasta -l /data/proj2/home/students/m.borgmann/Master_thesis/data/raw/Quality_control/Assembly_stats/BUSCO_analysis/lineage_datasets/mollusca_odb10 -o Bolinus_SOAP_k63 -m genome --out_path /data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Bolinus_SOAP/QC_stats/k63_polished_BUSCO --cpu 60
+2024-12-04 15:10:06 INFO:busco.run_BUSCO	***** Start a BUSCO v5.8.0 analysis, current time: 12/04/2024 15:10:06 *****
+2024-12-04 15:10:06 DEBUG:busco.ConfigManager	Getting config file
+2024-12-04 15:10:06 INFO:busco.ConfigManager	Configuring BUSCO with local environment
+2024-12-04 15:10:06 INFO:busco.BuscoConfig	Running genome mode
+2024-12-04 15:10:06 ERROR:busco.BuscoRunner	Input /data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Bolinus_SOAP/k63_polish/Bolinus_k63_polished/Bolinus_k63_polished.fasta does not exist
+2024-12-04 15:10:06 DEBUG:busco.BuscoRunner	Input /data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Bolinus_SOAP/k63_polish/Bolinus_k63_polished/Bolinus_k63_polished.fasta does not exist
+Traceback (most recent call last):
+  File "/data/proj2/home/students/m.borgmann/miniforge3/envs/master_thesis/lib/python3.9/site-packages/busco/run_BUSCO.py", line 68, in run
+    self.load_config()
+  File "/data/proj2/home/students/m.borgmann/miniforge3/envs/master_thesis/lib/python3.9/site-packages/busco/run_BUSCO.py", line 60, in load_config
+    self.config_manager.load_busco_config_main()
+  File "/data/proj2/home/students/m.borgmann/miniforge3/envs/master_thesis/lib/python3.9/site-packages/busco/BuscoLogger.py", line 62, in wrapped_func
+    self.retval = func(*args, **kwargs)
+  File "/data/proj2/home/students/m.borgmann/miniforge3/envs/master_thesis/lib/python3.9/site-packages/busco/ConfigManager.py", line 63, in load_busco_config_main
+    self.config_main.validate()
+  File "/data/proj2/home/students/m.borgmann/miniforge3/envs/master_thesis/lib/python3.9/site-packages/busco/BuscoConfig.py", line 645, in validate
+    self._check_required_input_exists()
+  File "/data/proj2/home/students/m.borgmann/miniforge3/envs/master_thesis/lib/python3.9/site-packages/busco/BuscoConfig.py", line 823, in _check_required_input_exists
+    raise BatchFatalError(
+busco.Exceptions.BatchFatalError: Input /data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Bolinus_SOAP/k63_polish/Bolinus_k63_polished/Bolinus_k63_polished.fasta does not exist
+2024-12-04 15:10:06 ERROR:busco.BuscoRunner	BUSCO analysis failed!
+2024-12-04 15:10:06 ERROR:busco.BuscoRunner	Check the logs, read the user guide (https://busco.ezlab.org/busco_userguide.html), and check the BUSCO issue board on https://gitlab.com/ezlab/busco/issues
+
