@@ -8,7 +8,7 @@ generates a diploid consensus FASTA using IUPAC codes (via bcftools consensus),
 converts it to PSMC input format using seqtk and fq2psmcfa, and runs the PSMC analysis
 with bootstrapping.
 
-Author: [Your Name]
+Author: Max Borgmann
 Date: March 2025
 """
 
@@ -202,8 +202,8 @@ class PSMCPipeline:
     def vcf_to_psmcfa(self, sample):
         """
         1) bcftools consensus --> IUPAC-coded FASTA
-        2) seqtk seq -cM -l80
-        3) fq2psmcfa -
+
+        2) fq2psmcfa -
         """
         sample_dir = os.path.join(self.args.output_dir, sample)
         os.makedirs(sample_dir, exist_ok=True)
@@ -233,7 +233,7 @@ class PSMCPipeline:
 
         # Convert to PSMCFA
         self.logger.info(f"Generating PSMCFA for {sample}")
-        cmd_psmcfa = f"cat {iupac_fa} | seqtk seq -cM -l80 | fq2psmcfa - > {psmcfa_file}"
+        cmd_psmcfa = f"cat {iupac_fa} | fq2psmcfa - > {psmcfa_file}"
         if not self.run_command(cmd_psmcfa):
             self.logger.error("PSMCFA generation failed")
             return None

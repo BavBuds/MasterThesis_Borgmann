@@ -1,9 +1,41 @@
+#!/usr/bin/env python3
+"""
+Coverage Analysis Pipeline
+
+This script performs comprehensive coverage analysis for genomic data, including read mapping,
+coverage calculation, variant calling, and advanced visualization. It processes multiple samples
+simultaneously (both Illumina and ONT data), generates standardized coverage statistics, and
+creates comparative visualizations to facilitate direct interpretation across samples.
+
+The pipeline includes:
+- Automatic read mapping using appropriate tools (minimap2 for ONT, bwa-mem2 for Illumina)
+- BAM filtering and processing with duplicate removal
+- Raw and normalized coverage calculation with appropriate depth caps
+- Variant calling with bcftools (DP≥10, QUAL≥30 filtering)
+- Heterozygosity and missing data assessment
+- Multi-sample comparative coverage visualization:
+  - Individual sample comprehensive plots
+  - Cross-sample comparisons with standardized axes
+  - Distribution overlays and cumulative coverage curves
+  - Coverage statistics summaries and heatmaps
+
+Author: Max Borgmann
+Date: March 2025
+"""
+
+
 import os
 import subprocess
 import logging
+import sys
 from Bio import SeqIO
 import matplotlib.pyplot as plt
 import pandas as pd
+import numpy as np
+import matplotlib.gridspec as gridspec
+from matplotlib.colors import LinearSegmentedColormap
+import seaborn as sns
+from matplotlib.ticker import FuncFormatter
 
 # Set up logging
 def setup_logging(log_directory, log_filename="pipeline.log"):
@@ -756,67 +788,347 @@ logger.info("\nQC Report Summary:\n")
 logger.info(report_text)
 
 ####################################################
-# Step 6: Coverage Distribution Plots (Raw + Truncated)
+# Step 6: Improved Coverage Distribution Plots
 ####################################################
+
+
 logger.info("\n===========================")
-logger.info("📈 Generating coverage plots")
+logger.info("📈 Generating improved coverage plots")
 logger.info("===========================\n")
 
 plot_dir = os.path.join(QC_DIR, "Plots")
 os.makedirs(plot_dir, exist_ok=True)
 logger.debug(f"Plot directory created: {plot_dir}")
 
-for sample in samples:
+# Color palette for different samples
+color_palette = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2']
+
+# Collect all depth data
+all_depths_raw = {}
+all_depths_capped = {}
+cap_dict = {"ILLUMINA": 250, "ONT": 500}
+
+# Step 1: Load all depth data
+for i, sample in enumerate(samples):
     depth_path = depth_files[sample]
     if not os.path.exists(depth_path):
-        logger.warning(f"⏭️  Skipping plot for {sample} — depth file missing.")
+        logger.warning(f"⏭️  Skipping depth for {sample} — depth file missing.")
         continue
-
-    logger.info(f"📊 Plotting coverage histogram for {sample}...")
+        
     try:
-        # Read raw depths
+        logger.info(f"Loading depth data for {sample}...")
         depths_df = pd.read_csv(depth_path, sep="\t", header=None, usecols=[2], names=["depth"])
-        raw_depth_values = depths_df["depth"].values
-
-        # (A) Plot raw coverage distribution (clipped at 99th percentile for display)
-        clip_thresh_raw = pd.Series(raw_depth_values).quantile(0.99)
-        clipped_raw = pd.Series(raw_depth_values).clip(upper=clip_thresh_raw)
-
-        plt.figure(figsize=(10, 5))
-        plt.hist(clipped_raw, bins=100, color='skyblue', edgecolor='black')
-        plt.title(f"Raw Coverage Distribution for {sample}")
-        plt.xlabel(f"Depth (clipped at 99th percentile: {clip_thresh_raw:.0f})")
-        plt.ylabel("Number of Positions")
-        plt.grid(True)
-        plt.tight_layout()
-
-        raw_plot_path = os.path.join(plot_dir, f"{sample}_coverage_hist_raw.png")
-        plt.savefig(raw_plot_path)
-        plt.close()
-        logger.info(f"✅ Saved raw coverage plot: {raw_plot_path}")
-
-        # (B) Plot truncated coverage distribution
-        cap = 250 if samples[sample]['data_type'] == 'ILLUMINA' else 500
-        truncated_values = [min(d, cap) for d in raw_depth_values]
-        # Optionally clip at 99th percentile for a nicer histogram
-        clip_thresh_trunc = pd.Series(truncated_values).quantile(0.99)
-        clipped_trunc = pd.Series(truncated_values).clip(upper=clip_thresh_trunc)
-
-        plt.figure(figsize=(10, 5))
-        plt.hist(clipped_trunc, bins=100, color='orange', edgecolor='black')
-        plt.title(f"Truncated Coverage Distribution for {sample} (cap={cap}x)")
-        plt.xlabel(f"Depth (clipped at 99th percentile: {clip_thresh_trunc:.0f})")
-        plt.ylabel("Number of Positions")
-        plt.grid(True)
-        plt.tight_layout()
-
-        trunc_plot_path = os.path.join(plot_dir, f"{sample}_coverage_hist_truncated.png")
-        plt.savefig(trunc_plot_path)
-        plt.close()
-        logger.info(f"✅ Saved truncated coverage plot: {trunc_plot_path}")
-
+        raw_depths = depths_df["depth"].values
+        
+        # Store raw depths
+        all_depths_raw[sample] = raw_depths
+        
+        # Apply appropriate cap based on data type
+        cap = cap_dict.get(samples[sample]["data_type"], 250)
+        capped_depths = np.minimum(raw_depths, cap)
+        all_depths_capped[sample] = capped_depths
+        
+        logger.info(f"✅ Loaded depth data for {sample}: {len(raw_depths):,} positions")
+        logger.info(f"   Raw depth stats: min={np.min(raw_depths)}, median={np.median(raw_depths):.1f}, " 
+                   f"mean={np.mean(raw_depths):.1f}, max={np.max(raw_depths)}")
+        logger.info(f"   Capped depth stats: min={np.min(capped_depths)}, median={np.median(capped_depths):.1f}, "
+                   f"mean={np.mean(capped_depths):.1f}, max={np.max(capped_depths)}")
     except Exception as e:
-        logger.error(f"❌ Error generating coverage plots for {sample}: {e}")
+        logger.error(f"❌ Error loading depth data for {sample}: {e}")
+
+if not all_depths_raw:
+    logger.error("No depth data found for any sample. Skipping plot generation.")
+    sys.exit(1)
+
+# Step 2: Define global limits for standardization
+# For raw plots: use 99.9th percentile to handle extreme outliers
+all_raw_values = np.concatenate([depths for depths in all_depths_raw.values()])
+global_raw_99pct = np.percentile(all_raw_values, 99.9)
+logger.info(f"Global 99.9th percentile for raw depths: {global_raw_99pct:.1f}x")
+
+# For capped plots: use maximum capped value across all samples
+global_capped_max = max([np.max(depths) for depths in all_depths_capped.values()])
+logger.info(f"Global maximum for capped depths: {global_capped_max:.1f}x")
+
+# Set bin counts for histograms
+bin_count = 100
+bin_edges_raw = np.linspace(0, global_raw_99pct, bin_count + 1)
+bin_edges_capped = np.linspace(0, global_capped_max, bin_count + 1)
+
+# Step 3: Generate individual standardized plots for each sample
+logger.info("Generating individual standardized plots for each sample...")
+
+for sample, raw_depths in all_depths_raw.items():
+    capped_depths = all_depths_capped[sample]
+    cap = cap_dict.get(samples[sample]["data_type"], 250)
+    data_type = samples[sample]["data_type"]
+    color = color_palette[list(all_depths_raw.keys()).index(sample) % len(color_palette)]
+    
+    try:
+        # Create a figure with 2x2 subplots
+        fig = plt.figure(figsize=(15, 12))
+        gs = gridspec.GridSpec(2, 2, figure=fig)
+        
+        # 1. Raw Linear Scale Histogram
+        ax1 = fig.add_subplot(gs[0, 0])
+        counts, _, patches = ax1.hist(raw_depths, bins=bin_edges_raw, alpha=0.8, color=color, edgecolor='black')
+        ax1.set_title(f"{sample} - Raw Coverage Distribution ({data_type})", fontsize=12)
+        ax1.set_xlabel("Depth (raw)", fontsize=10)
+        ax1.set_ylabel("Number of Positions", fontsize=10)
+        ax1.grid(True, alpha=0.3)
+        ax1.set_xlim(0, global_raw_99pct)
+        
+        # Add statistics to plot
+        stats_text = (f"Mean: {np.mean(raw_depths):.1f}x\n"
+                     f"Median: {np.median(raw_depths):.1f}x\n"
+                     f"Max: {np.max(raw_depths):.1f}x\n"
+                     f"Sites ≥10x: {np.sum(raw_depths >= 10) / len(raw_depths) * 100:.1f}%")
+        ax1.text(0.95, 0.95, stats_text, transform=ax1.transAxes, 
+                fontsize=9, va='top', ha='right', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # 2. Raw Log Scale Histogram
+        ax2 = fig.add_subplot(gs[0, 1])
+        # For log scale, make sure there are no zeros
+        nonzero_depths = raw_depths[raw_depths > 0]
+        if len(nonzero_depths) > 0:
+            # Use log bins to better show distribution
+            log_bins = np.logspace(np.log10(max(0.1, np.min(nonzero_depths))), 
+                                  np.log10(max(np.max(raw_depths), 1)), 
+                                  bin_count)
+            counts, _, patches = ax2.hist(raw_depths, bins=log_bins, alpha=0.8, color=color, edgecolor='black')
+            ax2.set_xscale('log')
+            ax2.set_title(f"{sample} - Raw Coverage (Log Scale)", fontsize=12)
+            ax2.set_xlabel("Depth (log scale)", fontsize=10)
+            ax2.set_ylabel("Number of Positions", fontsize=10)
+            ax2.grid(True, alpha=0.3, which='both')
+        else:
+            ax2.text(0.5, 0.5, "No non-zero depth values", 
+                    ha='center', va='center', transform=ax2.transAxes)
+            
+        # 3. Capped Histogram
+        ax3 = fig.add_subplot(gs[1, 0])
+        counts, _, patches = ax3.hist(capped_depths, bins=bin_edges_capped, alpha=0.8, color=color, edgecolor='black')
+        ax3.set_title(f"{sample} - Capped Coverage (≤{cap}x)", fontsize=12)
+        ax3.set_xlabel("Depth (capped)", fontsize=10)
+        ax3.set_ylabel("Number of Positions", fontsize=10)
+        ax3.grid(True, alpha=0.3)
+        ax3.set_xlim(0, global_capped_max)
+        
+        # Add statistics to plot
+        stats_text = (f"Mean: {np.mean(capped_depths):.1f}x\n"
+                     f"Median: {np.median(capped_depths):.1f}x\n"
+                     f"99th pct: {np.percentile(capped_depths, 99):.1f}x\n"
+                     f"Sites ≥10x: {np.sum(capped_depths >= 10) / len(capped_depths) * 100:.1f}%")
+        ax3.text(0.95, 0.95, stats_text, transform=ax3.transAxes, 
+                fontsize=9, va='top', ha='right', 
+                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        # 4. Cumulative Distribution
+        ax4 = fig.add_subplot(gs[1, 1])
+        # Sort the data for cumulative plot
+        sorted_depths = np.sort(capped_depths)
+        # Calculate cumulative probabilities (0 to 1)
+        cumulative_prob = np.arange(1, len(sorted_depths) + 1) / len(sorted_depths)
+        
+        ax4.plot(sorted_depths, cumulative_prob, color=color, linewidth=2)
+        ax4.set_title(f"{sample} - Cumulative Coverage Distribution", fontsize=12)
+        ax4.set_xlabel("Depth (capped)", fontsize=10)
+        ax4.set_ylabel("Cumulative Fraction of Positions", fontsize=10)
+        ax4.grid(True, alpha=0.3)
+        ax4.set_xlim(0, global_capped_max)
+        ax4.set_ylim(0, 1.05)
+        
+        # Add coverage thresholds lines at 10x, 20x, 30x
+        thresholds = [10, 20, 30]
+        for thresh in thresholds:
+            if thresh <= global_capped_max:
+                # Find fraction of positions with coverage >= threshold
+                frac = np.sum(capped_depths >= thresh) / len(capped_depths)
+                # Add a horizontal line at this fraction
+                ax4.axhline(y=frac, color='gray', linestyle='--', alpha=0.7)
+                # Add a vertical line at the threshold
+                ax4.axvline(x=thresh, color='gray', linestyle='--', alpha=0.7)
+                # Add text label
+                ax4.text(thresh+1, frac+0.02, f"{frac*100:.1f}% ≥ {thresh}x", 
+                        fontsize=8, va='bottom', ha='left')
+        
+        plt.tight_layout()
+        plot_path = os.path.join(plot_dir, f"{sample}_coverage_comprehensive.png")
+        plt.savefig(plot_path, dpi=150)
+        plt.close(fig)
+        logger.info(f"✅ Saved comprehensive coverage plot: {plot_path}")
+        
+    except Exception as e:
+        logger.error(f"❌ Error generating plots for {sample}: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+
+# Step 4: Generate comparative plots across all samples
+logger.info("Generating comparative plots across all samples...")
+
+try:
+    # Comparative figure with 2x2 layout
+    fig = plt.figure(figsize=(18, 14))
+    gs = gridspec.GridSpec(2, 2, figure=fig)
+    
+    # 1. Raw Coverage Histogram Overlay (with alpha transparency)
+    ax1 = fig.add_subplot(gs[0, 0])
+    for i, (sample, depths) in enumerate(all_depths_raw.items()):
+        color = color_palette[i % len(color_palette)]
+        # Use fewer bins for overlay to avoid cluttering
+        ax1.hist(depths, bins=50, alpha=0.4, 
+                 range=(0, global_raw_99pct),
+                 label=f"{sample} ({samples[sample]['data_type']})",
+                 color=color, edgecolor='none')
+    
+    ax1.set_title("Raw Coverage Comparison (99.9th percentile cap)", fontsize=14)
+    ax1.set_xlabel("Depth", fontsize=12)
+    ax1.set_ylabel("Number of Positions", fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim(0, global_raw_99pct)
+    ax1.legend(loc='upper right', fontsize=10)
+    
+    # 2. Capped Coverage Histogram Overlay
+    ax2 = fig.add_subplot(gs[0, 1])
+    for i, (sample, depths) in enumerate(all_depths_capped.items()):
+        color = color_palette[i % len(color_palette)]
+        cap = cap_dict.get(samples[sample]["data_type"], 250)
+        ax2.hist(depths, bins=50, alpha=0.4, 
+                 range=(0, global_capped_max),
+                 label=f"{sample} (cap: {cap}x)",
+                 color=color, edgecolor='none')
+    
+    ax2.set_title("Capped Coverage Comparison", fontsize=14)
+    ax2.set_xlabel("Depth (capped)", fontsize=12)
+    ax2.set_ylabel("Number of Positions", fontsize=12)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim(0, global_capped_max)
+    ax2.legend(loc='upper right', fontsize=10)
+    
+    # 3. Cumulative Distributions (best for comparison)
+    ax3 = fig.add_subplot(gs[1, 0])
+    for i, (sample, depths) in enumerate(all_depths_capped.items()):
+        color = color_palette[i % len(color_palette)]
+        # Sort the data for cumulative plot
+        sorted_depths = np.sort(depths)
+        # Calculate cumulative probabilities (0 to 1)
+        cumulative_prob = np.arange(1, len(sorted_depths) + 1) / len(sorted_depths)
+        
+        ax3.plot(sorted_depths, cumulative_prob, color=color, linewidth=2,
+                label=f"{sample} ({samples[sample]['data_type']})")
+    
+    ax3.set_title("Cumulative Coverage Distribution Comparison", fontsize=14)
+    ax3.set_xlabel("Depth (capped)", fontsize=12)
+    ax3.set_ylabel("Cumulative Fraction of Positions", fontsize=12)
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xlim(0, global_capped_max)
+    ax3.set_ylim(0, 1.05)
+    
+    # Add key thresholds
+    thresholds = [10, 20, 30]
+    for thresh in thresholds:
+        if thresh <= global_capped_max:
+            ax3.axvline(x=thresh, color='gray', linestyle='--', alpha=0.5)
+            ax3.text(thresh+1, 0.02, f"{thresh}x", fontsize=10, color='gray')
+    
+    ax3.legend(loc='lower right', fontsize=10)
+    
+    # 4. Coverage Summary statistics
+    ax4 = fig.add_subplot(gs[1, 1])
+    
+    # Calculate key metrics for each sample
+    sample_names = []
+    mean_values = []
+    median_values = []
+    pct10x_values = []
+    
+    for sample, depths in all_depths_capped.items():
+        sample_names.append(sample)
+        mean_values.append(np.mean(depths))
+        median_values.append(np.median(depths))
+        pct10x_values.append(np.sum(depths >= 10) / len(depths) * 100)
+    
+    # Create bar chart with grouped bars
+    x = np.arange(len(sample_names))
+    width = 0.25
+    
+    ax4.bar(x - width, mean_values, width, label='Mean Coverage', color='#1f77b4')
+    ax4.bar(x, median_values, width, label='Median Coverage', color='#ff7f0e')
+    ax4.bar(x + width, pct10x_values, width, label='% ≥10x Coverage', color='#2ca02c')
+    
+    ax4.set_title("Coverage Summary Statistics", fontsize=14)
+    ax4.set_ylabel("Coverage / Percentage", fontsize=12)
+    ax4.set_xticks(x)
+    ax4.set_xticklabels(sample_names, rotation=45, ha='right')
+    ax4.legend(loc='upper left', fontsize=10)
+    ax4.grid(True, alpha=0.3, axis='y')
+    
+    # Add data labels on top of bars
+    for i, v in enumerate(mean_values):
+        ax4.text(i - width, v + 1, f"{v:.1f}", ha='center', va='bottom', fontsize=9, rotation=90)
+    for i, v in enumerate(median_values):
+        ax4.text(i, v + 1, f"{v:.1f}", ha='center', va='bottom', fontsize=9, rotation=90)
+    for i, v in enumerate(pct10x_values):
+        ax4.text(i + width, v + 1, f"{v:.1f}%", ha='center', va='bottom', fontsize=9, rotation=90)
+    
+    plt.tight_layout()
+    comparative_plot_path = os.path.join(plot_dir, "comparative_coverage_analysis.png")
+    plt.savefig(comparative_plot_path, dpi=150)
+    plt.close(fig)
+    logger.info(f"✅ Saved comparative coverage plot: {comparative_plot_path}")
+    
+    # Step 5: Create a heatmap of depth distribution
+    try:
+        # Create a distribution heatmap for easier visual comparison
+        plt.figure(figsize=(15, 8))
+        
+        # Set up the data for the heatmap
+        # Use regular bins for x-axis (coverage depths)
+        coverage_bins = np.linspace(0, global_capped_max, 100)
+        
+        # Calculate the histograms for each sample
+        histogram_data = []
+        sample_labels = []
+        for sample, depths in all_depths_capped.items():
+            hist, _ = np.histogram(depths, bins=coverage_bins, density=True)
+            histogram_data.append(hist)
+            sample_labels.append(f"{sample} ({samples[sample]['data_type']})")
+        
+        # Create a heatmap of normalized histograms
+        plt.imshow(histogram_data, aspect='auto', cmap='viridis', 
+                   extent=[0, global_capped_max, len(sample_labels)-0.5, -0.5])
+        
+        plt.colorbar(label='Normalized Density')
+        plt.title('Coverage Distribution Heatmap (Capped)', fontsize=14)
+        plt.xlabel('Coverage Depth', fontsize=12)
+        plt.yticks(range(len(sample_labels)), sample_labels)
+        
+        # Add key coverage thresholds
+        for thresh in [10, 20, 30]:
+            if thresh <= global_capped_max:
+                plt.axvline(x=thresh, color='red', linestyle='--', alpha=0.6)
+                plt.text(thresh+1, -0.5, f"{thresh}x", color='red', 
+                        va='top', ha='left', fontsize=9)
+        
+        plt.tight_layout()
+        heatmap_path = os.path.join(plot_dir, "coverage_distribution_heatmap.png")
+        plt.savefig(heatmap_path, dpi=150)
+        plt.close()
+        logger.info(f"✅ Saved coverage distribution heatmap: {heatmap_path}")
+    
+    except Exception as e:
+        logger.error(f"❌ Error generating heatmap: {e}")
+        import traceback
+        logger.debug(traceback.format_exc())
+    
+except Exception as e:
+    logger.error(f"❌ Error generating comparative plots: {e}")
+    import traceback
+    logger.debug(traceback.format_exc())
+
+logger.info("\n📊 Coverage plot generation completed")
+logger.info(f"📂 Plots saved to: {plot_dir}")
 
 logger.info("\n=======================")
 logger.info("🎉 Pipeline completed!")

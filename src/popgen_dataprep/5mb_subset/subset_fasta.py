@@ -12,7 +12,7 @@ The tool calculates and reports key assembly statistics such as:
 - Total sequence size
 - File sizes
 
-Author: [Your Name]
+Author: Max Borgmann
 Date: March 2025
 """
 
@@ -185,6 +185,8 @@ class FastaSubsetGenerator:
             file_size = os.path.getsize(fasta_file)
             human_file_size = f"{file_size / (1024*1024):.2f} MB"
             
+            mean_gc, stdev_gc = self.calculate_gc_content(fasta_file)
+            
             stats = {
                 "file_path": fasta_file,
                 "file_size_bytes": file_size,
@@ -194,7 +196,9 @@ class FastaSubsetGenerator:
                 "longest_contig": max(contig_lengths) if contig_lengths else 0,
                 "shortest_contig": min(contig_lengths) if contig_lengths else 0,
                 "avg_contig_length": int(sum(contig_lengths) / len(contig_lengths)) if contig_lengths else 0,
-                "n50": self.calculate_n50(contig_lengths) if contig_lengths else 0
+                "n50": self.calculate_n50(contig_lengths) if contig_lengths else 0,
+                "gc_mean": mean_gc,
+                "gc_stdev": stdev_gc
             }
             
             self.logger.debug(f"Statistics computed: {stats['contig_count']} contigs, {stats['total_bases']:,} bases")
@@ -204,6 +208,23 @@ class FastaSubsetGenerator:
             self.logger.error(f"Error computing statistics for {fasta_file}: {str(e)}")
             return None
 
+    def calculate_gc_content(self, fasta_file):
+        """Calculate mean and standard deviation of GC content across contigs."""
+        gc_contents = []
+        for record in SeqIO.parse(fasta_file, "fasta"):
+            seq = str(record.seq).upper()
+            gc_count = seq.count("G") + seq.count("C")
+            if len(seq) > 0:
+                gc_contents.append((gc_count / len(seq)) * 100)
+        
+        if gc_contents:
+            mean_gc = statistics.mean(gc_contents)
+            stdev_gc = statistics.stdev(gc_contents) if len(gc_contents) > 1 else 0.0
+        else:
+            mean_gc = 0.0
+            stdev_gc = 0.0
+        
+        return round(mean_gc, 2), round(stdev_gc, 2)
 
     def calculate_n50(self, contig_lengths):
         """
@@ -225,7 +246,6 @@ class FastaSubsetGenerator:
                 return length
                 
         return 0
-
     def subset_fasta(self, input_fasta, output_fasta, max_size=None):
         """
         Subset the largest contigs until reaching the size threshold.
@@ -286,44 +306,54 @@ class FastaSubsetGenerator:
             self.logger.error(f"Error subsetting FASTA file {input_fasta}: {str(e)}")
             return None
 
-    def print_stats_table(self, stats_collection):
+
+    def print_stats_table(self, original_stats, subset_stats):
         """
-        Print a formatted table of statistics for all processed files.
-        
+        Print a formatted comparison table of original and subset FASTA statistics.
+
         Args:
-            stats_collection: Dictionary mapping sample IDs to statistics dictionaries
+            original_stats: Dict of original full assembly stats
+            subset_stats: Dict of subset FASTA stats
         """
-        if not stats_collection:
-            self.logger.warning("No statistics to report")
-            return
-        
-        self.logger.info("\n" + "="*80)
-        self.logger.info("SUMMARY OF PROCESSED FILES")
-        self.logger.info("="*80)
-        
-        headers = ["Sample", "File Size", "Contigs", "Total Bases", "Longest", "N50"]
-        row_format = "{:<6} {:<12} {:<8} {:<15} {:<12} {:<12}"
-        
-        self.logger.info(row_format.format(*headers))
-        self.logger.info("-"*80)
-        
-        for sample, stats in stats_collection.items():
-            if stats:
-                row = [
-                    sample,
-                    stats["file_size"],
-                    f"{stats['contig_count']}",
-                    f"{stats['total_bases']:,}",
-                    f"{stats['longest_contig']:,}",
-                    f"{stats['n50']:,}"
-                ]
-                self.logger.info(row_format.format(*row))
-        
-        self.logger.info("="*80)
+        self.logger.info("\n" + "="*140)
+        self.logger.info("COMPARISON OF ORIGINAL VS SUBSET ASSEMBLIES")
+        self.logger.info("="*140)
+
+        headers = [
+            "Sample", "Contigs (orig)", "Contigs (sub)",
+            "N50 (orig)", "N50 (sub)", "GC% (orig)", "GC% (sub)",
+            "Bases (orig)", "Bases (sub)"
+        ]
+        row_fmt = "{:<8} {:<15} {:<14} {:<12} {:<10} {:<12} {:<12} {:<14} {:<14}"
+        self.logger.info(row_fmt.format(*headers))
+        self.logger.info("-"*140)
+
+        for sample in original_stats:
+            orig = original_stats.get(sample)
+            sub = subset_stats.get(sample)
+
+            if not orig or not sub:
+                continue
+
+            row = [
+                sample,
+                f"{orig['contig_count']}",
+                f"{sub['contig_count']}",
+                f"{orig['n50']:,}",
+                f"{sub['n50']:,}",
+                f"{orig['gc_mean']}±{orig['gc_stdev']}",
+                f"{sub['gc_mean']}±{sub['gc_stdev']}",
+                f"{orig['total_bases']:,}",
+                f"{sub['total_bases']:,}"
+            ]
+            self.logger.info(row_fmt.format(*row))
+
+        self.logger.info("="*140)
+
 
     def run(self):
         """
-        Run the FASTA subset generator for all input files.
+        Run the FASTA subset generator for all input files and compare to original assemblies.
         
         Returns:
             int: 0 if successful, 1 if any errors occurred
@@ -331,34 +361,41 @@ class FastaSubsetGenerator:
         start_time = time.time()
         self.logger.info("Starting FASTA subset generation process")
         
-        output_stats = {}
+        original_stats = {}
+        subset_stats = {}
         error_count = 0
         
         for sample, input_fasta in self.input_files.items():
             self.logger.info(f"\nProcessing sample: {sample}")
-            # Create a subfolder for the sample inside Input_fastas
             sample_output_dir = os.path.join(self.samples_output_dir, sample)
             os.makedirs(sample_output_dir, exist_ok=True)
             output_fasta = os.path.join(sample_output_dir, f"{sample}_assembly_5mb_subset.fasta")
-            
+
             try:
-                stats = self.subset_fasta(input_fasta, output_fasta)
-                output_stats[sample] = stats
-                if not stats:
+                # Stats for original
+                original_stats[sample] = self.get_fasta_stats(input_fasta)
+
+                # Generate subset + stats
+                subset_stats[sample] = self.subset_fasta(input_fasta, output_fasta)
+
+                if not subset_stats[sample]:
                     error_count += 1
+
             except Exception as e:
                 self.logger.error(f"Unhandled error processing {sample}: {str(e)}")
                 import traceback
                 self.logger.debug(traceback.format_exc())
-                output_stats[sample] = None
+                original_stats[sample] = None
+                subset_stats[sample] = None
                 error_count += 1
-        
-        self.print_stats_table(output_stats)
+
+        self.print_stats_table(original_stats, subset_stats)
         duration = time.time() - start_time
         self.logger.info(f"\nProcess completed in {duration:.2f} seconds")
         self.logger.info(f"Processed {len(self.input_files)} files with {error_count} errors")
-        
+
         return 0 if error_count == 0 else 1
+
 
 
 if __name__ == "__main__":
