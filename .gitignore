@@ -55,7 +55,7 @@ transposed_report.*
 
 # Directory structures (but keep .gitkeep)
 data/**/*
-
+data/*/raw/
 !data/**/.gitkeep
 
 # Additional system files
