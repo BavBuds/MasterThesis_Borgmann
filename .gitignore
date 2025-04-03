@@ -44,6 +44,7 @@ transposed_report.*
 *.gb
 *.embl
 *.qual
+*.fastq
 
 # Additional bioinformatics output
 *.contigs
@@ -54,7 +55,7 @@ transposed_report.*
 
 # Directory structures (but keep .gitkeep)
 data/**/*
-!data/**/*/
+
 !data/**/.gitkeep
 
 # Additional system files
