@@ -8,6 +8,7 @@ Sequentially applies:
 
 Designed to work with assemblies from FLYE/CANU pipeline.
 Includes robust resume functionality to continue from interrupted runs.
+Supports multiple nanopore FASTQ files from a directory.
 
 Author: Based on pipeline format by Max Borgmann
 Date: 03.04.2025
@@ -440,7 +441,94 @@ def run_busco(fasta_file, out_dir, lineage, threads, assembly_name, step, state_
     return json_file
 
 # --------------------------------------------------------------------
-# 4. Racon Polishing
+# 4. Nanopore Read Handling
+# --------------------------------------------------------------------
+def find_nanopore_reads(reads_path):
+    """
+    Find all nanopore read files in a directory or return the file if it's a single file.
+    
+    Args:
+        reads_path: Path to a reads file or directory containing read files
+    
+    Returns:
+        List of paths to read files
+    """
+    if os.path.isfile(reads_path):
+        # Single file
+        return [reads_path]
+    
+    if os.path.isdir(reads_path):
+        # Directory of reads - find all fastq files
+        read_files = []
+        for ext in [".fastq", ".fq", ".fastq.gz", ".fq.gz"]:
+            read_files.extend(glob.glob(os.path.join(reads_path, f"*{ext}")))
+            # Also search in subdirectories 1 level deep (e.g., fastq_pass)
+            for subdir in glob.glob(os.path.join(reads_path, "*/")):
+                read_files.extend(glob.glob(os.path.join(subdir, f"*{ext}")))
+                # Also look 2 levels deep for common ONT structures
+                for subsubdir in glob.glob(os.path.join(subdir, "*/")):
+                    read_files.extend(glob.glob(os.path.join(subsubdir, f"*{ext}")))
+        
+        if not read_files:
+            logger.warning(f"No read files found in {reads_path}")
+            return []
+        
+        logger.info(f"Found {len(read_files)} read files in {reads_path}")
+        for f in read_files:
+            logger.debug(f"  - {f}")
+        
+        return sorted(read_files)
+    
+    logger.warning(f"Path does not exist or is not a file/directory: {reads_path}")
+    return []
+
+def concatenate_reads(read_files, output_file, force=False):
+    """
+    Concatenate multiple read files into a single file.
+    Handles both gzipped and uncompressed files.
+    
+    Args:
+        read_files: List of read files
+        output_file: Path to output file
+        force: Force overwrite if output file exists
+    
+    Returns:
+        Path to concatenated file or None if failed
+    """
+    if not read_files:
+        logger.error("No read files provided for concatenation")
+        return None
+    
+    if len(read_files) == 1:
+        logger.info(f"Only one read file provided, using it directly: {read_files[0]}")
+        return read_files[0]
+    
+    if os.path.exists(output_file) and os.path.getsize(output_file) > 0 and not force:
+        logger.info(f"✅ Resuming: Using existing concatenated reads file: {output_file}")
+        return output_file
+    
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
+    # Check if files are gzipped
+    is_gzipped = any(f.endswith(".gz") for f in read_files)
+    
+    if is_gzipped:
+        # For gzipped files, use zcat to concatenate
+        cmd = f"zcat {' '.join(read_files)} > {output_file}"
+    else:
+        # For uncompressed files, use cat
+        cmd = f"cat {' '.join(read_files)} > {output_file}"
+    
+    ok, _ = run_cmd(cmd, desc=f"Concatenating {len(read_files)} read files")
+    if not ok or not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+        logger.error(f"Failed to concatenate read files")
+        return None
+    
+    logger.info(f"Successfully concatenated {len(read_files)} read files to {output_file}")
+    return output_file
+
+# --------------------------------------------------------------------
+# 5. Racon Polishing
 # --------------------------------------------------------------------
 def run_racon_polishing(assembly_fasta, reads_file, output_dir, assembly_name, round_num, threads=16, state_dir=None, force=False):
     """
@@ -448,7 +536,7 @@ def run_racon_polishing(assembly_fasta, reads_file, output_dir, assembly_name, r
     
     Args:
         assembly_fasta: Input assembly FASTA
-        reads_file: Long reads file (FASTQ)
+        reads_file: Long reads file (FASTQ) or list of files
         output_dir: Output directory
         assembly_name: Name of the assembly
         round_num: Racon round number (1-4)
@@ -469,6 +557,21 @@ def run_racon_polishing(assembly_fasta, reads_file, output_dir, assembly_name, r
             if os.path.exists(polished_path) and os.path.getsize(polished_path) > 0:
                 logger.info(f"✅ Resuming: Racon round {round_num} already completed for {assembly_name}")
                 return polished_path
+    
+    # Handle multiple read files if reads_file is a list
+    if isinstance(reads_file, list):
+        # Create temp directory for concatenated reads
+        temp_dir = os.path.join(output_dir, "temp_reads")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Concatenate reads if needed
+        concat_file = os.path.join(temp_dir, f"{assembly_name}_concat_reads.fastq")
+        reads_file = concatenate_reads(reads_file, concat_file, force=force)
+        if not reads_file:
+            logger.error(f"Failed to prepare read files for Racon round {round_num}")
+            if state_dir:
+                update_state(state_dir, assembly_name, step, "failed", error="read_preparation_failed")
+            return None
     
     # Create output directory
     os.makedirs(output_dir, exist_ok=True)
@@ -527,7 +630,7 @@ def run_racon_rounds(assembly_fasta, reads_file, output_dir, assembly_name, roun
     
     Args:
         assembly_fasta: Input assembly FASTA
-        reads_file: Long reads file (FASTQ)
+        reads_file: Long reads file (FASTQ) or list of files or directory
         output_dir: Output directory
         assembly_name: Name of the assembly
         rounds: Number of Racon rounds (default: 4)
@@ -548,6 +651,17 @@ def run_racon_rounds(assembly_fasta, reads_file, output_dir, assembly_name, roun
     if busco_lineage and run_stats:
         busco_dir = os.path.join(output_dir, "busco")
         os.makedirs(busco_dir, exist_ok=True)
+    
+    # Check if reads_file is a directory and find all read files
+    if isinstance(reads_file, str) and (os.path.isdir(reads_file) or os.path.isfile(reads_file)):
+        read_files = find_nanopore_reads(reads_file)
+        if not read_files:
+            logger.error(f"No read files found in {reads_file}")
+            return None
+        logger.info(f"Using {len(read_files)} read files for polishing")
+    else:
+        # Already a list of files
+        read_files = reads_file if isinstance(reads_file, list) else [reads_file]
     
     # Start with original assembly
     current_assembly = assembly_fasta
@@ -589,7 +703,7 @@ def run_racon_rounds(assembly_fasta, reads_file, output_dir, assembly_name, roun
         # Run this round of Racon
         polished = run_racon_polishing(
             assembly_fasta=current_assembly,
-            reads_file=reads_file,
+            reads_file=read_files,
             output_dir=polish_dir,
             assembly_name=assembly_name,
             round_num=round_num,
@@ -624,7 +738,7 @@ def run_racon_rounds(assembly_fasta, reads_file, output_dir, assembly_name, roun
     return current_assembly
 
 # --------------------------------------------------------------------
-# 5. Medaka Polishing (for ONT data)
+# 6. Medaka Polishing (for ONT data)
 # --------------------------------------------------------------------
 def run_medaka_polishing(assembly_fasta, reads_file, output_dir, assembly_name, model=None, threads=16, state_dir=None, force=False):
     """
@@ -632,7 +746,7 @@ def run_medaka_polishing(assembly_fasta, reads_file, output_dir, assembly_name, 
     
     Args:
         assembly_fasta: Input assembly FASTA (typically after Racon)
-        reads_file: ONT reads file (FASTQ)
+        reads_file: ONT reads file (FASTQ) or list of files or directory
         output_dir: Output directory
         assembly_name: Name of the assembly
         model: Medaka model to use (default: auto-detect)
@@ -658,6 +772,28 @@ def run_medaka_polishing(assembly_fasta, reads_file, output_dir, assembly_name, 
     medaka_dir = os.path.join(output_dir, f"{assembly_name}_medaka")
     os.makedirs(medaka_dir, exist_ok=True)
     
+    # Check if reads_file is a directory and find all read files
+    if isinstance(reads_file, str) and (os.path.isdir(reads_file) or os.path.isfile(reads_file)):
+        read_files = find_nanopore_reads(reads_file)
+        if not read_files:
+            logger.error(f"No read files found in {reads_file}")
+            if state_dir:
+                update_state(state_dir, assembly_name, step, "failed", error="no_reads_found")
+            return None
+        logger.info(f"Using {len(read_files)} read files for Medaka polishing")
+    else:
+        # Already a list of files
+        read_files = reads_file if isinstance(reads_file, list) else [reads_file]
+    
+    # Concatenate reads if needed for Medaka
+    concat_reads_file = os.path.join(medaka_dir, f"{assembly_name}_concat_reads.fastq")
+    concat_reads = concatenate_reads(read_files, concat_reads_file, force=force)
+    if not concat_reads:
+        logger.error(f"Failed to prepare read files for Medaka")
+        if state_dir:
+            update_state(state_dir, assembly_name, step, "failed", error="read_preparation_failed")
+        return None
+    
     # Determine the appropriate Medaka model if not specified
     if not model:
         # Default models for different data types
@@ -674,7 +810,7 @@ def run_medaka_polishing(assembly_fasta, reads_file, output_dir, assembly_name, 
         logger.info(f"✅ Resuming: Found existing Medaka output")
     else:
         # Run Medaka
-        cmd = f"medaka_consensus -i {reads_file} -d {assembly_fasta} -o {medaka_dir} -t {threads} -m {model}"
+        cmd = f"medaka_consensus -i {concat_reads} -d {assembly_fasta} -o {medaka_dir} -t {threads} -m {model}"
         ok, _ = run_cmd(cmd, desc=f"Medaka polishing")
         if not ok or not os.path.exists(polished_out) or os.path.getsize(polished_out) == 0:
             logger.error(f"Medaka polishing failed for {assembly_name}")
@@ -697,7 +833,7 @@ def run_medaka_polishing(assembly_fasta, reads_file, output_dir, assembly_name, 
     return final_out
 
 # --------------------------------------------------------------------
-# 6. NextPolish (with Illumina short reads)
+# 7. NextPolish (with Illumina short reads)
 # --------------------------------------------------------------------
 def run_nextpolish(assembly_fasta, r1_file, r2_file, output_dir, assembly_name, threads=16, state_dir=None, force=False):
     """
@@ -799,7 +935,7 @@ sgs_options = -max_depth 100 -bwa
     return final_out
 
 # --------------------------------------------------------------------
-# 7. Complete Polishing Pipeline
+# 8. Complete Polishing Pipeline
 # --------------------------------------------------------------------
 def run_full_polishing_pipeline(assembly_fasta, long_reads, r1_file, r2_file, output_dir, 
                                assembly_name, tech_type=None, racon_rounds=4, threads=16, 
@@ -809,7 +945,7 @@ def run_full_polishing_pipeline(assembly_fasta, long_reads, r1_file, r2_file, ou
     
     Args:
         assembly_fasta: Input assembly FASTA
-        long_reads: Long reads file (FASTQ) for Racon
+        long_reads: Long reads file/directory (FASTQ) for Racon
         r1_file: Illumina R1 reads for NextPolish
         r2_file: Illumina R2 reads for NextPolish
         output_dir: Output directory
@@ -826,7 +962,7 @@ def run_full_polishing_pipeline(assembly_fasta, long_reads, r1_file, r2_file, ou
     """
     logger.info(f"\n=== Starting Polishing Pipeline for {assembly_name} ===")
     logger.info(f"Input assembly: {assembly_fasta}")
-    logger.info(f"Long reads: {long_reads}")
+    logger.info(f"Long reads source: {long_reads}")
     logger.info(f"Illumina R1: {r1_file}")
     logger.info(f"Illumina R2: {r2_file}")
     
@@ -943,7 +1079,7 @@ def run_full_polishing_pipeline(assembly_fasta, long_reads, r1_file, r2_file, ou
     return results
 
 # --------------------------------------------------------------------
-# 8. Summary and Evaluation
+# 9. Summary and Evaluation
 # --------------------------------------------------------------------
 def create_polishing_summary(output_dir, assembly_name=None):
     """
@@ -1122,7 +1258,7 @@ def check_dependencies():
     print("✅ All dependencies satisfied.\n")
 
 # --------------------------------------------------------------------
-# 9. Main
+# 10. Main
 # --------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
@@ -1132,7 +1268,13 @@ def main():
     # Required inputs
     parser.add_argument("-a", "--assembly", required=True, help="Input assembly FASTA file")
     parser.add_argument("-o", "--output_dir", default="Polished_Assemblies", help="Output directory")
-    parser.add_argument("-l", "--long_reads", required=True, help="Long reads FASTQ/FASTA file for Racon/Medaka")
+    
+    # Long reads options (file or directory)
+    reads_group = parser.add_mutually_exclusive_group(required=True)
+    reads_group.add_argument("-l", "--long_reads", help="Single long reads FASTQ/FASTA file for Racon/Medaka")
+    reads_group.add_argument("-d", "--reads_dir", help="Directory containing multiple long read files (e.g., fastq_pass)")
+    
+    # Illumina reads
     parser.add_argument("-1", "--r1", help="Illumina R1 reads for NextPolish")
     parser.add_argument("-2", "--r2", help="Illumina R2 reads for NextPolish")
     
@@ -1161,7 +1303,11 @@ def main():
     log_fp = setup_logging(args.output_dir)
     logger.info(f"=== Assembly Polishing Pipeline: Racon + Medaka + NextPolish ===")
     logger.info(f"Input assembly: {args.assembly}")
-    logger.info(f"Long reads: {args.long_reads}")
+    
+    # Determine long reads source (file or directory)
+    long_reads_source = args.long_reads if args.long_reads else args.reads_dir
+    logger.info(f"Long reads source: {long_reads_source}")
+    
     logger.info(f"Illumina R1: {args.r1 if args.r1 else 'Not provided'}")
     logger.info(f"Illumina R2: {args.r2 if args.r2 else 'Not provided'}")
     logger.info(f"Output dir: {args.output_dir}")
@@ -1216,6 +1362,17 @@ def main():
     # Create necessary directories
     os.makedirs(args.output_dir, exist_ok=True)
     
+    # Find long read files if a directory was specified
+    if args.reads_dir:
+        read_files = find_nanopore_reads(args.reads_dir)
+        if not read_files:
+            logger.error(f"No read files found in {args.reads_dir}")
+            sys.exit(1)
+        logger.info(f"Found {len(read_files)} read files")
+        long_reads = read_files
+    else:
+        long_reads = args.long_reads
+    
     # Update assembly information in state
     update_assembly_info(args.output_dir, args.name, tech=args.tech, original_file=args.assembly)
     
@@ -1230,7 +1387,7 @@ def main():
         logger.info(f"\n=== Racon Polishing ({args.racon_rounds} rounds) ===")
         racon_out = run_racon_rounds(
             assembly_fasta=args.assembly,
-            reads_file=args.long_reads,
+            reads_file=long_reads,
             output_dir=args.output_dir,
             assembly_name=args.name,
             rounds=args.racon_rounds,
@@ -1258,7 +1415,7 @@ def main():
             logger.info(f"\n=== Medaka Polishing (ONT data) ===")
             medaka_out = run_medaka_polishing(
                 assembly_fasta=current_assembly,
-                reads_file=args.long_reads,
+                reads_file=long_reads,
                 output_dir=args.output_dir,
                 assembly_name=args.name,
                 model=args.medaka_model,

@@ -11,9 +11,10 @@ This version uses separate conda environments (via mamba) to avoid conflicts:
   - soap_env
   - masurca_env
   - captus_env
+  - busco_env
 
 You only need to run this script once; it will:
-  1) Create the above 3 envs if missing.
+  1) Create the above envs if missing.
   2) Run the entire pipeline in each env as needed.
 """
 
@@ -54,11 +55,11 @@ def get_existing_envs_via_mamba():
 
 def setup_conda_envs():
     """
-    Creates three envs via mamba if they do not already exist:
+    Creates four envs via mamba if they do not already exist:
       - soap_env
       - masurca_env
       - captus_env
-    Each is pinned to python=3.10 and includes busco=5.8.2 & seqkit=2.3.1.
+      - busco_env (new separate environment for BUSCO)
     """
     existing_envs = get_existing_envs_via_mamba()
 
@@ -68,12 +69,21 @@ def setup_conda_envs():
         cmd = (
             "mamba create -y -n soap_env "
             "-c conda-forge -c bioconda "
-            "python=3.10 soapdenovo2-gapcloser=2.04 "
-            "busco=5.8.2 seqkit=2.3.1"
+            "python=3.10 soapdenovo2-gapcloser soapdenovo2 seqkit=2.3.1 tabulate"
         )
         subprocess.run(cmd, shell=True, check=True)
     else:
         print("Environment already exists: soap_env")
+        # Ensure SOAPdenovo2-GapCloser and tabulate are installed
+        cmd = (
+            "mamba install -y -n soap_env "
+            "-c conda-forge -c bioconda "
+            "soapdenovo2-gapcloser soapdenovo2 tabulate"
+        )
+        try:
+            subprocess.run(cmd, shell=True, check=True)
+        except:
+            print("Warning: Could not install SOAPdenovo2-GapCloser in soap_env.")
 
     # --- masurca_env ---
     if "masurca_env" not in existing_envs:
@@ -81,12 +91,21 @@ def setup_conda_envs():
         cmd = (
             "mamba create -y -n masurca_env "
             "-c conda-forge -c bioconda "
-            "python=3.10 masurca=4.0.9 "
-            "busco=5.8.2 seqkit=2.3.1"
+            "python=3.10 masurca=4.0.9 seqkit=2.3.1 tabulate"
         )
         subprocess.run(cmd, shell=True, check=True)
     else:
         print("Environment already exists: masurca_env")
+        # Ensure MaSuRCA is installed
+        cmd = (
+            "mamba install -y -n masurca_env "
+            "-c conda-forge -c bioconda "
+            "masurca=4.0.9 tabulate"
+        )
+        try:
+            subprocess.run(cmd, shell=True, check=True)
+        except:
+            print("Warning: Could not install MaSuRCA in masurca_env.")
 
     # --- captus_env ---
     if "captus_env" not in existing_envs:
@@ -94,16 +113,51 @@ def setup_conda_envs():
         cmd = (
             "mamba create -y -n captus_env "
             "-c conda-forge -c bioconda "
-            "python=3.10 captus=1.3.0 "
-            "busco=5.8.2 seqkit=2.3.1"
+            "python=3.10 captus=1.3.0 muscle=5.1 seqkit=2.3.1 tabulate"
         )
         subprocess.run(cmd, shell=True, check=True)
     else:
         print("Environment already exists: captus_env")
+        # Reinstall captus if it was removed by BUSCO
+        cmd = (
+            "mamba install -y -n captus_env "
+            "-c conda-forge -c bioconda "
+            "captus=1.3.0 muscle=5.1 tabulate"
+        )
+        try:
+            subprocess.run(cmd, shell=True, check=True)
+        except:
+            print("Warning: Could not reinstall captus in captus_env.")
+
+    # --- busco_env (new) ---
+    if "busco_env" not in existing_envs:
+        print("Creating conda environment: busco_env")
+        cmd = (
+            "mamba create -y -n busco_env "
+            "-c conda-forge -c bioconda "
+            "python=3.10 busco=5.8.2 seqkit=2.3.1 tabulate"
+        )
+        try:
+            subprocess.run(cmd, shell=True, check=True)
+        except:
+            print("Warning: Could not create busco_env.")
+            print("You will need to run BUSCO analyses separately.")
+    else:
+        print("Environment already exists: busco_env")
+        # Ensure tabulate is installed
+        cmd = (
+            "mamba install -y -n busco_env "
+            "-c conda-forge -c bioconda "
+            "tabulate"
+        )
+        try:
+            subprocess.run(cmd, shell=True, check=True)
+        except:
+            print("Warning: Could not install tabulate in busco_env.")
 
 def run_in_env(env_name, cmd, cwd=None, desc=None):
     """
-    Run 'cmd' inside conda environment 'env_name' with mamba run (or conda run).
+    Run 'cmd' inside conda environment 'env_name' with mamba run.
     Returns (ok, stdout).
     """
     if desc:
@@ -161,7 +215,6 @@ def get_file_hash(file_path):
     """Get SHA256 hash of a file for integrity verification."""
     if not os.path.exists(file_path):
         return None
-    
     sha256_hash = hashlib.sha256()
     with open(file_path, "rb") as f:
         for byte_block in iter(lambda: f.read(4096), b""):
@@ -201,7 +254,6 @@ def update_state(output_dir, sample, assembler, config, step, status, **kwargs):
     asm_key = f"{assembler}_{config}"
     if asm_key not in state[sample]["assemblers"]:
         state[sample]["assemblers"][asm_key] = {}
-
     state[sample]["assemblers"][asm_key][step] = {"status": status, **kwargs}
     state[sample]["last_update"] = datetime.now().isoformat()
     write_state(state, output_dir)
@@ -253,17 +305,14 @@ def parse_busco_json(json_file):
     if not os.path.exists(json_file):
         logger.warning(f"BUSCO JSON not found: {json_file}")
         return {}
-
     with open(json_file, 'r') as f:
         try:
             js = json.load(f)
         except Exception as e:
             logger.error(f"Error loading BUSCO JSON {json_file}: {e}")
             return {}
-
     results = js.get("results", {})
     metrics = js.get("metrics", {})
-
     def to_int(x):
         try:
             return int(x)
@@ -274,7 +323,6 @@ def parse_busco_json(json_file):
             return float(x)
         except:
             return 0.0
-
     data = {}
     data["complete_percent"] = to_float(results.get("Complete percentage", 0.0))
     data["missing_percent"]  = to_float(results.get("Missing percentage", 0.0))
@@ -290,27 +338,20 @@ def get_gc_content(env_name, fasta_file, output_dir=None, sample=None, assembler
     """
     if not fasta_file or not os.path.exists(fasta_file):
         return 0.0
-
-    # Check state
     if output_dir and sample and assembler and config and not force:
         step_data = get_completed_step_data(output_dir, sample, assembler, config, "gc")
         if step_data and "value" in step_data:
             logger.info(f"✅ Resuming: GC content already known for {sample}/{assembler}/{config}")
             return step_data["value"]
-
     out_file = f"{fasta_file}.seqkit_stats.txt"
     cmd = f"seqkit stats -a {fasta_file} -o {out_file}"
     ok, _ = run_in_env(env_name, cmd, desc="seqkit stats")
     if not ok or not os.path.exists(out_file):
         return 0.0
-
     df = pd.read_csv(out_file, sep='\t', comment='#')
     if df.empty:
         return 0.0
-
     gc_value = float(df.iloc[0].get("gc_content", 0.0))
-
-    # Update state
     if output_dir and sample and assembler and config:
         update_state(output_dir, sample, assembler, config, "gc", "completed", value=gc_value)
     return gc_value
@@ -325,8 +366,6 @@ def run_soapdenovo2_with_gapcloser(r1, r2, output_dir, sample_name, k_value, thr
     env_name = "soap_env"
     assembler = "SOAP"
     config = f"k{k_value}"
-
-    # Check if assembly done
     if not force and state_dir and is_step_completed(state_dir, sample_name, assembler, config, "assembly"):
         step_data = get_completed_step_data(state_dir, sample_name, assembler, config, "assembly")
         if step_data and "path" in step_data:
@@ -334,11 +373,9 @@ def run_soapdenovo2_with_gapcloser(r1, r2, output_dir, sample_name, k_value, thr
             if os.path.exists(asm_path) and os.path.getsize(asm_path) > 0:
                 logger.info(f"✅ Resuming: SOAP assembly k={k_value} for {sample_name}")
                 return asm_path
-
     os.makedirs(output_dir, exist_ok=True)
     soap_dir = os.path.join(output_dir, f"{sample_name}_soap_k{k_value}")
     os.makedirs(soap_dir, exist_ok=True)
-
     config_file = os.path.join(soap_dir, "soap_config.txt")
     with open(config_file, 'w') as f:
         f.write(f"""max_rd_len=150
@@ -352,79 +389,138 @@ map_len=40
 q1={r1}
 q2={r2}
 """)
-
     prefix = os.path.join(soap_dir, f"{sample_name}_soap_k{k_value}")
     pregraph_file = f"{prefix}.preGraphBasic"
     contig_file   = f"{prefix}.contig"
     map_file      = f"{prefix}.readOnContig.readInGap.peGrads"
     scaff_file    = f"{prefix}.scafSeq"
     gapclosed_file= f"{prefix}.gapclosed.fasta"
-
-    # 1) pregraph
-    if not os.path.exists(pregraph_file) or force:
-        pre_cmd = f"SOAPdenovo-{k_value}mer pregraph -s {config_file} -K {k_value} -p {threads} -o {prefix}"
-        ok, _ = run_in_env(env_name, pre_cmd, desc=f"SOAP pregraph k={k_value}")
-        if not ok:
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="pregraph_failed")
-            return None
-    else:
-        logger.info(f"✅ Skipping SOAP pregraph k={k_value}; already done.")
-
-    # 2) contig
-    if not os.path.exists(contig_file) or force:
-        contig_cmd = f"SOAPdenovo-{k_value}mer contig -g {prefix}"
-        ok, _ = run_in_env(env_name, contig_cmd, desc=f"SOAP contig k={k_value}")
-        if not ok:
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="contig_failed")
-            return None
-    else:
-        logger.info(f"✅ Skipping SOAP contig k={k_value}; already done.")
-
-    # 3) map
-    if not os.path.exists(map_file) or force:
-        map_cmd = f"SOAPdenovo-{k_value}mer map -s {config_file} -g {prefix} -p {threads}"
-        ok, _ = run_in_env(env_name, map_cmd, desc=f"SOAP map k={k_value}")
-        if not ok:
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="map_failed")
-            return None
-    else:
-        logger.info(f"✅ Skipping SOAP map k={k_value}; already done.")
-
-    # 4) scaff
-    if not os.path.exists(scaff_file) or force:
-        scaff_cmd = f"SOAPdenovo-{k_value}mer scaff -g {prefix} -F"
-        ok, _ = run_in_env(env_name, scaff_cmd, desc=f"SOAP scaff k={k_value}")
-        if not ok:
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="scaff_failed")
-            return None
-    else:
-        logger.info(f"✅ Skipping SOAP scaff k={k_value}; already done.")
-
-    # 5) GapCloser
-    if not os.path.exists(gapclosed_file) or force or os.path.getsize(gapclosed_file) == 0:
-        gapcloser_cmd = f"GapCloser -b {config_file} -a {prefix}.scafSeq -o {gapclosed_file} -t {threads}"
-        ok, _ = run_in_env(env_name, gapcloser_cmd, desc="GapCloser")
-        if not ok:
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="gapcloser_failed")
-            return None
-    else:
-        logger.info("✅ Skipping GapCloser; already done or file present.")
-
+    
+    # First, check if SOAPdenovo binary is available with alternative names
+    soap_cmd_options = [
+        f"SOAPdenovo-{k_value}mer",            # Original 
+        f"SOAPdenovo-{k_value}mer.bin",        # Alternative 1
+        f"SOAPdenovo{k_value}",                # Alternative 2
+        f"soapdenovo{k_value}",                # Alternative 3
+        "SOAPdenovo",                          # Generic
+        "soapdenovo",                          # Generic lowercase
+        "soapdenovo2"                          # Package name
+    ]
+    
+    # Test which command is available
+    soap_cmd = None
+    for cmd in soap_cmd_options:
+        test_cmd = f"mamba run -n {env_name} which {cmd}"
+        try:
+            result = subprocess.run(test_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode == 0 and result.stdout.strip():
+                soap_cmd = cmd
+                logger.info(f"Found SOAP binary: {soap_cmd}")
+                break
+        except:
+            continue
+    
+    if not soap_cmd:
+        logger.error(f"❌ No SOAPdenovo binary found for k={k_value} in {env_name}")
+        if state_dir:
+            update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="soap_binary_not_found")
+        return None
+    
+    try:
+        if not os.path.exists(pregraph_file) or force:
+            pre_cmd = f"{soap_cmd} pregraph -s {config_file} -K {k_value} -p {threads} -o {prefix}"
+            ok, _ = run_in_env(env_name, pre_cmd, desc=f"SOAP pregraph k={k_value}")
+            if not ok:
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="pregraph_failed")
+                return None
+        else:
+            logger.info(f"✅ Skipping SOAP pregraph k={k_value}; already done.")
+        
+        if not os.path.exists(contig_file) or force:
+            contig_cmd = f"{soap_cmd} contig -g {prefix}"
+            ok, _ = run_in_env(env_name, contig_cmd, desc=f"SOAP contig k={k_value}")
+            if not ok:
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="contig_failed")
+                return None
+        else:
+            logger.info(f"✅ Skipping SOAP contig k={k_value}; already done.")
+        
+        if not os.path.exists(map_file) or force:
+            map_cmd = f"{soap_cmd} map -s {config_file} -g {prefix} -p {threads}"
+            ok, _ = run_in_env(env_name, map_cmd, desc=f"SOAP map k={k_value}")
+            if not ok:
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="map_failed")
+                return None
+        else:
+            logger.info(f"✅ Skipping SOAP map k={k_value}; already done.")
+        
+        if not os.path.exists(scaff_file) or force:
+            scaff_cmd = f"{soap_cmd} scaff -g {prefix} -F"
+            ok, _ = run_in_env(env_name, scaff_cmd, desc=f"SOAP scaff k={k_value}")
+            if not ok:
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="scaff_failed")
+                return None
+        else:
+            logger.info(f"✅ Skipping SOAP scaff k={k_value}; already done.")
+    except Exception as e:
+        logger.error(f"Exception during SOAP assembly steps: {e}")
+        if state_dir:
+            update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error=f"exception_{str(e)}")
+        return None
+    
+    # Check for alternative GapCloser names as well
+    gapcloser_cmd_options = [
+        "GapCloser",
+        "gapcloser",
+        "GapCloser.bin"
+    ]
+    
+    gapcloser_cmd = None
+    for cmd in gapcloser_cmd_options:
+        test_cmd = f"mamba run -n {env_name} which {cmd}"
+        try:
+            result = subprocess.run(test_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode == 0 and result.stdout.strip():
+                gapcloser_cmd = cmd
+                logger.info(f"Found GapCloser binary: {gapcloser_cmd}")
+                break
+        except:
+            continue
+    
+    if not gapcloser_cmd:
+        logger.error(f"❌ No GapCloser binary found in {env_name}")
+        if state_dir:
+            update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="gapcloser_binary_not_found")
+        return None
+    
+    try:    
+        if not os.path.exists(gapclosed_file) or force or os.path.getsize(gapclosed_file) == 0:
+            gapcloser_full_cmd = f"{gapcloser_cmd} -b {config_file} -a {prefix}.scafSeq -o {gapclosed_file} -t {threads}"
+            ok, _ = run_in_env(env_name, gapcloser_full_cmd, desc="GapCloser")
+            if not ok:
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="gapcloser_failed")
+                return None
+        else:
+            logger.info("✅ Skipping GapCloser; already done or file present.")
+    except Exception as e:
+        logger.error(f"Exception during GapCloser: {e}")
+        if state_dir:
+            update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error=f"gapcloser_exception_{str(e)}")
+        return None
+    
     if not os.path.exists(gapclosed_file):
         logger.error(f"Gapclosed file not found for SOAP k={k_value}")
         if state_dir:
             update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="gapclosed_missing")
         return None
-
+    
     final_asm = os.path.join(output_dir, f"{sample_name}_soap_k{k_value}.fasta")
     shutil.copy2(gapclosed_file, final_asm)
-
-    # Update state
     if state_dir:
         update_state(
             state_dir, sample_name, assembler, config, "assembly", "completed",
@@ -445,7 +541,6 @@ def run_masurca(r1, r2, output_dir, sample_name, config_name, threads=16, state_
     env_name = "masurca_env"
     assembler = "MaSuRCA"
     config = config_name
-
     if not force and state_dir and is_step_completed(state_dir, sample_name, assembler, config, "assembly"):
         step_data = get_completed_step_data(state_dir, sample_name, assembler, config, "assembly")
         if step_data and "path" in step_data:
@@ -453,37 +548,42 @@ def run_masurca(r1, r2, output_dir, sample_name, config_name, threads=16, state_
             if os.path.exists(asm_path) and os.path.getsize(asm_path) > 0:
                 logger.info(f"✅ Resuming: MaSuRCA {config_name} for {sample_name}")
                 return asm_path
-
     os.makedirs(output_dir, exist_ok=True)
     ms_dir = os.path.join(output_dir, f"{sample_name}_masurca_{config_name}")
     os.makedirs(ms_dir, exist_ok=True)
-
+    
+    # Get absolute paths for r1 and r2
+    r1_abs = os.path.abspath(r1)
+    r2_abs = os.path.abspath(r2)
+    
     if config_name == "permissive":
         kmer_size = 31
-        kmer_count= 2
+        kmer_count = 2
         cgw_error = 0.15
-        ovl_mer   = 30
-        do_trim   = 0
+        ovl_mer = 30
+        do_trim = 0
     else:
         kmer_size = 61
-        kmer_count= 3
+        kmer_count = 3
         cgw_error = 0.10
-        ovl_mer   = 45
-        do_trim   = 1
-
+        ovl_mer = 45
+        do_trim = 1
+    
     jf_size = 1300000000
     config_file = os.path.join(ms_dir, "masurca_config.txt")
+    logger.info(f"Creating MaSuRCA config at: {os.path.abspath(config_file)}")
+    
     with open(config_file, 'w') as f:
         f.write(f"""# MaSuRCA configuration
 DATA
-PE = pe 150 15 {r1} {r2}
+PE = pe 150 15 {r1_abs} {r2_abs}
 END
 
 PARAMETERS
 GRAPH_KMER_SIZE = {kmer_size}
 USE_LINKING_MATES = 1
 LIMIT_JUMP_COVERAGE = 300
-CA_PARAMETERS = ovlMerSize={ovl_mer} cgwErrorRate={cgw_error} ovlHashBits=25 ovlHashBlockLength=100000000 utgMemory=650GB obtMemory=650GB
+CA_PARAMETERS = ovlMerSize={ovl_mer} cgwErrorRate={cgw_error} ovlHashBits=25 ovlHashBlockLength=100000000 utgMemory=100GB obtMemory=100GB
 KMER_COUNT_THRESHOLD = {kmer_count}
 NUM_THREADS = {threads}
 JF_SIZE = {jf_size}
@@ -492,26 +592,52 @@ CLOSE_GAPS = 1
 SOAP_ASSEMBLY = 0
 END
 """)
-
+    
+    # Check if MaSuRCA binary is available
+    masurca_cmd = None
+    masurca_options = ["masurca", "MaSuRCA", "masurca.bin"]
+    for cmd in masurca_options:
+        test_cmd = f"mamba run -n {env_name} which {cmd}"
+        try:
+            result = subprocess.run(test_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if result.returncode == 0 and result.stdout.strip():
+                masurca_cmd = cmd
+                logger.info(f"Found MaSuRCA binary: {masurca_cmd}")
+                break
+        except:
+            continue
+    
+    if not masurca_cmd:
+        logger.error(f"❌ No MaSuRCA binary found in {env_name}")
+        if state_dir:
+            update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="masurca_binary_not_found")
+        return None
+    
     final_candidates = [
         os.path.join(ms_dir, "CA", "final.genome.scf.fasta"),
         os.path.join(ms_dir, "CA", "9-terminator", "genome.scf.fasta")
     ]
     found_existing = False
     final_asm_path = None
-
     for cand in final_candidates:
         if os.path.exists(cand) and os.path.getsize(cand) > 0 and not force:
             found_existing = True
             final_asm_path = cand
             logger.info(f"✅ Resuming: Found existing MaSuRCA assembly: {cand}")
             break
-
     if not found_existing or force:
         # 1) generate assemble.sh
         assemble_sh = os.path.join(ms_dir, "assemble.sh")
         if not os.path.exists(assemble_sh) or force:
-            cmd1 = f"masurca {config_file}"
+            # Check if config file exists
+            if not os.path.exists(config_file):
+                logger.error(f"MaSuRCA config file not found: {config_file}")
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="masurca_config_missing")
+                return None
+                
+            cmd1 = f"{masurca_cmd} {os.path.abspath(config_file)}"
+            logger.info(f"Running MaSuRCA config: {cmd1} in directory {ms_dir}")
             ok, _ = run_in_env(env_name, cmd1, cwd=ms_dir, desc="MaSuRCA config->assemble.sh")
             if not ok:
                 if state_dir:
@@ -519,38 +645,35 @@ END
                 return None
         else:
             logger.info(f"✅ Skipping MaSuRCA config step; assemble.sh already exists.")
-
         # 2) run assemble.sh
-        cmd2 = "./assemble.sh"
+        cmd2 = "bash ./assemble.sh"  # Explicitly use bash
         ok, _ = run_in_env(env_name, cmd2, cwd=ms_dir, desc=f"MaSuRCA run {config_name}")
         if not ok:
             if state_dir:
                 update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="masurca_assembly_failed")
             return None
-
-        # check final scf
         for cand in final_candidates:
             if os.path.exists(cand) and os.path.getsize(cand) > 0:
                 final_asm_path = cand
                 break
-
         if not final_asm_path:
-            logger.error(f"No final scf found for {config_name} in {ms_dir}")
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="masurca_missing_final")
-            return None
-
+            # Try to find assembly files using a more flexible search
+            assembly_candidates = glob.glob(os.path.join(ms_dir, "**", "*.scf.fasta"), recursive=True)
+            if assembly_candidates:
+                final_asm_path = assembly_candidates[0]
+                logger.info(f"Found MaSuRCA assembly through glob search: {final_asm_path}")
+            else:
+                logger.error(f"No final scf found for {config_name} in {ms_dir}")
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="masurca_missing_final")
+                return None
     out_asm = os.path.join(output_dir, f"{sample_name}_masurca_{config_name}.fasta")
     shutil.copy2(final_asm_path, out_asm)
-
-    # Update state
     if state_dir:
-        update_state(
-            state_dir, sample_name, assembler, config, "assembly", "completed",
-            path=out_asm,
-            hash=get_file_hash(out_asm),
-            timestamp=datetime.now().isoformat()
-        )
+        update_state(state_dir, sample_name, assembler, config, "assembly", "completed",
+                     path=out_asm,
+                     hash=get_file_hash(out_asm),
+                     timestamp=datetime.now().isoformat())
     return out_asm
 
 # --------------------------------------------------------------------------------
@@ -563,7 +686,6 @@ def run_captus_assembly(r1, r2, output_dir, sample_name, threads=16, state_dir=N
     env_name = "captus_env"
     assembler = "Captus"
     config = "WGS"
-
     if not force and state_dir and is_step_completed(state_dir, sample_name, assembler, config, "assembly"):
         step_data = get_completed_step_data(state_dir, sample_name, assembler, config, "assembly")
         if step_data and "path" in step_data:
@@ -571,67 +693,121 @@ def run_captus_assembly(r1, r2, output_dir, sample_name, threads=16, state_dir=N
             if os.path.exists(asm_path) and os.path.getsize(asm_path) > 0:
                 logger.info(f"✅ Resuming: Captus WGS for {sample_name}")
                 return asm_path
-
     os.makedirs(output_dir, exist_ok=True)
     captus_dir = os.path.join(output_dir, f"{sample_name}_captus_wgs_run")
     os.makedirs(captus_dir, exist_ok=True)
-
-    final_asm_path = os.path.join(captus_dir, f"{sample_name}__captus-asm", "assembly.fasta")
-    if os.path.exists(final_asm_path) and os.path.getsize(final_asm_path) > 0 and not force:
-        logger.info(f"✅ Resuming: Found existing Captus assembly: {final_asm_path}")
-    else:
+    
+    # Multiple possible output locations
+    final_asm_paths = [
+        os.path.join(captus_dir, f"{sample_name}__captus-asm", "assembly.fasta"),
+        os.path.join(captus_dir, f"{sample_name}__captus-asm", "01_assembly", "assembly.fasta"),
+        os.path.join(captus_dir, "assembly.fasta")
+    ]
+    
+    # Check if any of the possible output files already exist
+    final_asm_path = None
+    for path in final_asm_paths:
+        if os.path.exists(path) and os.path.getsize(path) > 0 and not force:
+            final_asm_path = path
+            logger.info(f"✅ Resuming: Found existing Captus assembly: {path}")
+            break
+            
+    if final_asm_path is None or force:
+        # Set up the read directory for Captus
         clean_dir = os.path.join(captus_dir, "01_clean_reads")
         os.makedirs(clean_dir, exist_ok=True)
-
         r1_link = os.path.join(clean_dir, f"{sample_name}_R1.fastq")
         r2_link = os.path.join(clean_dir, f"{sample_name}_R2.fastq")
         for ln in [r1_link, r2_link]:
             if os.path.islink(ln):
                 os.unlink(ln)
-        os.symlink(os.path.abspath(r1), r1_link)
-        os.symlink(os.path.abspath(r2), r2_link)
-
+            elif os.path.exists(ln):
+                os.remove(ln)
+                
+        # Try symlinks first, but fall back to copying if symlinks fail
+        try:
+            os.symlink(os.path.abspath(r1), r1_link)
+            os.symlink(os.path.abspath(r2), r2_link)
+        except OSError:
+            logger.warning("Symlinks failed, copying input files instead")
+            shutil.copy2(r1, r1_link)
+            shutil.copy2(r2, r2_link)
+            
+        # Check if captus binary is available
+        captus_cmd = None
+        captus_options = ["captus", "Captus", "captus.bin"]
+        for cmd in captus_options:
+            test_cmd = f"mamba run -n {env_name} which {cmd}"
+            try:
+                result = subprocess.run(test_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode == 0 and result.stdout.strip():
+                    captus_cmd = cmd
+                    logger.info(f"Found Captus binary: {captus_cmd}")
+                    break
+            except:
+                continue
+        
+        if not captus_cmd:
+            logger.error(f"❌ No Captus binary found in {env_name}")
+            if state_dir:
+                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="captus_binary_not_found")
+            return None
+        
+        # Simplified command based on Captus documentation
+        # Point to the clean_dir as the reads directory (-r)
         cmd = (
-            f"captus assemble -r {clean_dir} -o {captus_dir} "
-            f"--threads {threads} --ram 32 --preset WGS "
-            f"--k-list 31,39,49,69,89,109,129,149,169 --min-count 3 "
-            f"--prune-level 2 --no-mercy"
+            f"{captus_cmd} assemble -r {clean_dir} -o {captus_dir} "
+            f"--threads {threads} --ram 32 --preset WGS"
         )
-        ok, _ = run_in_env(env_name, cmd, desc="Captus assembly")
+        logger.info(f"Running Captus with command: {cmd}")
+        ok, stderr = run_in_env(env_name, cmd, desc="Captus assembly")
+        
+        # Even if there's an error, check if the assembly succeeded but had a post-processing error
         if not ok:
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="captus_failed")
-            return None
-
-        if not os.path.exists(final_asm_path):
-            logger.error("Captus final assembly not found.")
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="captus_missing_final")
-            return None
-
+            logger.warning("Captus command returned an error, checking if assembly completed anyway")
+            
+        # Check all possible assembly output locations
+        final_asm_path = None
+        for path in final_asm_paths:
+            if os.path.exists(path) and os.path.getsize(path) > 0:
+                final_asm_path = path
+                logger.info(f"Found Captus assembly at: {path}")
+                break
+                
+        if not final_asm_path:
+            # Try to look for assembly in more locations
+            assembly_candidates = glob.glob(os.path.join(captus_dir, "**", "assembly.fasta"), recursive=True)
+            if assembly_candidates:
+                final_asm_path = assembly_candidates[0]
+                logger.info(f"Found Captus assembly through glob search: {final_asm_path}")
+            else:
+                logger.error("Captus final assembly not found, checked all possible locations")
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed", error="captus_missing_final")
+                return None
+    
+    # Copy the final assembly to the output directory
     out_fa = os.path.join(output_dir, f"{sample_name}_captus_wgs.fasta")
     shutil.copy2(final_asm_path, out_fa)
-
-    # Update state
     if state_dir:
-        update_state(
-            state_dir, sample_name, assembler, config, "assembly", "completed",
-            path=out_fa,
-            hash=get_file_hash(out_fa),
-            timestamp=datetime.now().isoformat()
-        )
+        update_state(state_dir, sample_name, assembler, config, "assembly", "completed",
+                     path=out_fa,
+                     hash=get_file_hash(out_fa),
+                     timestamp=datetime.now().isoformat())
     return out_fa
 
 # --------------------------------------------------------------------------------
 # 7. BUSCO
 # --------------------------------------------------------------------------------
-def run_busco(env_name, fasta_file, out_dir, lineage, threads, sample, assembler, config, state_dir=None, force=False):
+def run_busco(fasta_file, out_dir, lineage, threads, sample, assembler, config, state_dir=None, force=False):
     """
-    Runs BUSCO in env=env_name for 'fasta_file' with the given lineage, storing JSON in out_dir.
+    Runs BUSCO in busco_env for 'fasta_file' with the given lineage, storing JSON in out_dir.
     Updates pipeline state on success.
     """
+    # Always use the dedicated busco environment
+    env_name = "busco_env"
+    
     step = f"busco_{lineage.split('_')[0]}"  # e.g. "busco_mollusca"
-
     if not force and state_dir and is_step_completed(state_dir, sample, assembler, config, step):
         step_data = get_completed_step_data(state_dir, sample, assembler, config, step)
         if step_data and "path" in step_data and "result" in step_data:
@@ -639,19 +815,36 @@ def run_busco(env_name, fasta_file, out_dir, lineage, threads, sample, assembler
             if os.path.exists(json_file):
                 logger.info(f"✅ Resuming: BUSCO {lineage} for {sample}/{assembler}/{config}")
                 return json_file
-
     os.makedirs(out_dir, exist_ok=True)
     out_name = f"{sample}_{assembler}_{config}_{lineage}"
     busco_subdir = os.path.join(out_dir, out_name)
-
-    # If there's an existing short_summary.*.json, use it
     json_candidates = glob.glob(os.path.join(busco_subdir, "short_summary.*.json"))
     if json_candidates and not force:
         logger.info(f"✅ Resuming: found existing BUSCO {lineage} in {busco_subdir}")
         json_file = json_candidates[0]
     else:
+        # Check if busco binary is available
+        busco_cmd = None
+        busco_options = ["busco", "BUSCO", "busco.bin"]
+        for cmd in busco_options:
+            test_cmd = f"mamba run -n {env_name} which {cmd}"
+            try:
+                result = subprocess.run(test_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if result.returncode == 0 and result.stdout.strip():
+                    busco_cmd = cmd
+                    logger.info(f"Found BUSCO binary: {busco_cmd}")
+                    break
+            except:
+                continue
+        
+        if not busco_cmd:
+            logger.error(f"❌ No BUSCO binary found in {env_name}")
+            if state_dir:
+                update_state(state_dir, sample, assembler, config, step, "failed", error=f"busco_binary_not_found")
+            return None
+            
         cmd = (
-            f"busco -i {fasta_file} -o {out_name} -l {lineage} -m genome "
+            f"{busco_cmd} -i {fasta_file} -o {out_name} -l {lineage} -m genome "
             f"--cpu {threads} --out_path {out_dir} --force"
         )
         ok, _ = run_in_env(env_name, cmd, desc=f"BUSCO {lineage} for {sample}/{assembler}/{config}")
@@ -659,7 +852,6 @@ def run_busco(env_name, fasta_file, out_dir, lineage, threads, sample, assembler
             if state_dir:
                 update_state(state_dir, sample, assembler, config, step, "failed", error=f"busco_{lineage}_failed")
             return None
-
         json_candidates = glob.glob(os.path.join(busco_subdir, "short_summary.*.json"))
         if not json_candidates:
             logger.error(f"No BUSCO JSON found for lineage={lineage} in {busco_subdir}")
@@ -667,7 +859,6 @@ def run_busco(env_name, fasta_file, out_dir, lineage, threads, sample, assembler
                 update_state(state_dir, sample, assembler, config, step, "failed", error=f"busco_{lineage}_missing_json")
             return None
         json_file = json_candidates[0]
-
     busco_results = parse_busco_json(json_file)
     if state_dir:
         update_state(state_dir, sample, assembler, config, step, "completed",
@@ -688,13 +879,10 @@ def create_comparison_summary(results, out_dir):
     if df.empty:
         logger.warning("No results to summarize.")
         return
-
     df = df.sort_values(by=["busco_mollusca", "busco_eukaryota", "n50"], ascending=False)
-
     best = df.iloc[0]
     csv_path = os.path.join(out_dir, "assembly_comparison_summary.csv")
     df.to_csv(csv_path, index=False)
-
     md_path = os.path.join(out_dir, "assembly_comparison_summary.md")
     with open(md_path, 'w') as f:
         f.write("# Assembly Comparison Summary\n\n")
@@ -710,7 +898,6 @@ def create_comparison_summary(results, out_dir):
         f.write(f"- BUSCO (Eukaryota) = {best['busco_eukaryota']:.2f}%\n")
         f.write(f"- N50 = {best['n50']:,}\n")
         f.write(f"- GC% = {best['gc']:.2f}\n")
-
     logger.info(f"Comparison summary saved:\n  {csv_path}\n  {md_path}")
 
 def collect_results_from_state(output_dir):
@@ -730,15 +917,12 @@ def collect_results_from_state(output_dir):
             if len(parts) < 2:
                 continue
             assembler, config = parts
-
             assembly_data = asm_data.get("assembly", {})
             if assembly_data.get("status") != "completed":
                 continue
-
             busco_moll = asm_data.get("busco_mollusca", {})
             busco_euk  = asm_data.get("busco_eukaryota", {})
             gc_data    = asm_data.get("gc", {})
-
             row = {
                 "sample": sample,
                 "assembler": assembler,
@@ -774,7 +958,6 @@ def collect_results_from_state(output_dir):
                     row["total_length"] = r.get("total_length", 0)
             if gc_data.get("status") == "completed":
                 row["gc"] = gc_data.get("value", 0.0)
-
             results.append(row)
     return results
 
@@ -784,7 +967,6 @@ def collect_results_from_state(output_dir):
 def main():
     # 1) Create conda envs with mamba if missing
     setup_conda_envs()
-
     # 2) Argparse
     parser = argparse.ArgumentParser(
         description="All-vs-All pipeline for SOAP(Multi-step+GapCloser), MaSuRCA, Captus, with BUSCO and GC%. With resume functionality."
@@ -799,6 +981,9 @@ def main():
     parser.add_argument("--force-gc", action="store_true", help="Force re-run GC calculation only")
     parser.add_argument("--show-state", action="store_true", help="Show current state and exit")
     parser.add_argument("--reset-state", action="store_true", help="Reset pipeline state before running")
+    parser.add_argument("--reset-envs", action="store_true", help="Force recreate conda environments")
+    parser.add_argument("--skip-k127", action="store_true", help="Skip SOAPdenovo2 run with k=127 (e.g., for tiny test datasets)")
+
     args = parser.parse_args()
 
     log_fp = setup_logging(args.output_dir)
@@ -808,14 +993,12 @@ def main():
     logger.info(f"Threads: {args.threads}")
     logger.info(f"Logs -> {log_fp}")
 
-    # Reset state if requested
     if args.reset_state:
         sf = state_file_path(args.output_dir)
         if os.path.exists(sf):
             os.unlink(sf)
             logger.info(f"🧹 Reset pipeline state file: {sf}")
 
-    # Show state if requested
     if args.show_state:
         st = read_state(args.output_dir)
         if not st:
@@ -830,7 +1013,6 @@ def main():
                         status = step_data.get("status", "unknown")
                         status_symbol = "✅" if status == "completed" else "❌"
                         logger.info(f"    {step}: {status_symbol} {status}")
-            # Summaries
             existing_results = collect_results_from_state(args.output_dir)
             if existing_results:
                 df = pd.DataFrame(existing_results)
@@ -840,13 +1022,11 @@ def main():
                 logger.info(df.head(5).to_string())
         sys.exit(0)
 
-    # Make subdirs
     asm_dir   = os.path.join(args.output_dir, "assemblies")
     busco_dir = os.path.join(args.output_dir, "busco")
     os.makedirs(asm_dir, exist_ok=True)
     os.makedirs(busco_dir, exist_ok=True)
 
-    # Gather pairs
     r1_files = sorted(glob.glob(os.path.join(args.input_dir, "*_R1*.f*q*")))
     samples = {}
     for r1 in r1_files:
@@ -857,38 +1037,28 @@ def main():
             samples[sample_name] = (r1, r2_candidates[0])
         else:
             logger.warning(f"No R2 found for {r1}")
-
     if not samples:
         logger.error("No paired samples found. Exiting.")
         sys.exit(1)
-
-    # We store final results in a list of dicts
     all_results = []
     lineages = ["mollusca_odb10", "eukaryota_odb10"]
-
-    # Check if we are resuming
     state_exists = os.path.exists(state_file_path(args.output_dir)) and not args.force and not args.reset_state
     if state_exists:
         logger.info("🔄 Resuming pipeline from previous run.")
         existing_results = collect_results_from_state(args.output_dir)
         all_results.extend(existing_results)
-        completed_configs = set(
-            f"{r['sample']}_{r['assembler']}_{r['config']}" for r in existing_results
-        )
+        completed_configs = set(f"{r['sample']}_{r['assembler']}_{r['config']}" for r in existing_results)
         logger.info(f"Found {len(existing_results)} completed results in state.")
     else:
         completed_configs = set()
-
-    # Determine forced re-runs
     force_assembly = args.force or args.force_assembly
     force_busco    = args.force or args.force_busco
     force_gc       = args.force or args.force_gc
 
-    # Pipeline
     for sample_name, (r1, r2) in samples.items():
         logger.info(f"\n=== Sample: {sample_name} ===")
 
-        # 1) SOAP k=63
+        # SOAP k=63
         ckey = f"{sample_name}_SOAP_k63"
         if ckey not in completed_configs or force_assembly:
             soap63 = run_soapdenovo2_with_gapcloser(r1, r2, asm_dir, sample_name, 63,
@@ -899,11 +1069,10 @@ def main():
                 busco_data = {}
                 for lin in lineages:
                     bdir = os.path.join(busco_dir, f"soap_k63_{lin}")
-                    busco_json = run_busco("soap_env", soap63, bdir, lin, args.threads, sample_name, "SOAP", "k63",
+                    busco_json = run_busco(soap63, bdir, lin, args.threads, sample_name, "SOAP", "k63",
                                            state_dir=args.output_dir, force=force_busco)
                     if busco_json:
                         busco_data[lin] = parse_busco_json(busco_json)
-                # Collect
                 moll = busco_data.get("mollusca_odb10", {})
                 euk  = busco_data.get("eukaryota_odb10", {})
                 row = {
@@ -919,48 +1088,50 @@ def main():
                     "total_length": max(moll.get("total_length",0), euk.get("total_length",0)),
                     "gc": gc_val
                 }
-                # remove any old row for this config
                 all_results = [r for r in all_results if not(r["sample"]==sample_name and r["assembler"]=="SOAP" and r["config"]=="k63")]
                 all_results.append(row)
         else:
             logger.info(f"✅ Skipping SOAP k=63 for {sample_name}; already completed.")
 
-        # 2) SOAP k=127
-        ckey = f"{sample_name}_SOAP_k127"
-        if ckey not in completed_configs or force_assembly:
-            soap127 = run_soapdenovo2_with_gapcloser(r1, r2, asm_dir, sample_name, 127,
-                                                     threads=args.threads, state_dir=args.output_dir,
-                                                     force=force_assembly)
-            if soap127:
-                gc_val = get_gc_content("soap_env", soap127, args.output_dir, sample_name, "SOAP", "k127", force=force_gc)
-                busco_data = {}
-                for lin in lineages:
-                    bdir = os.path.join(busco_dir, f"soap_k127_{lin}")
-                    busco_json = run_busco("soap_env", soap127, bdir, lin, args.threads, sample_name, "SOAP", "k127",
-                                           state_dir=args.output_dir, force=force_busco)
-                    if busco_json:
-                        busco_data[lin] = parse_busco_json(busco_json)
-                moll = busco_data.get("mollusca_odb10", {})
-                euk  = busco_data.get("eukaryota_odb10", {})
-                row = {
-                    "sample": sample_name,
-                    "assembler": "SOAP",
-                    "config": "k127",
-                    "busco_mollusca": moll.get("complete_percent", 0.0),
-                    "missing_mollusca": moll.get("missing_percent", 0.0),
-                    "busco_eukaryota": euk.get("complete_percent", 0.0),
-                    "missing_eukaryota": euk.get("missing_percent", 0.0),
-                    "n50": max(moll.get("n50",0), euk.get("n50",0)),
-                    "num_contigs": max(moll.get("num_contigs",0), euk.get("num_contigs",0)),
-                    "total_length": max(moll.get("total_length",0), euk.get("total_length",0)),
-                    "gc": gc_val
-                }
-                all_results = [r for r in all_results if not(r["sample"]==sample_name and r["assembler"]=="SOAP" and r["config"]=="k127")]
-                all_results.append(row)
+        # SOAP k=127 (conditionally skipped)
+        if not args.skip_k127:
+            ckey = f"{sample_name}_SOAP_k127"
+            if ckey not in completed_configs or force_assembly:
+                soap127 = run_soapdenovo2_with_gapcloser(r1, r2, asm_dir, sample_name, 127,
+                                                         threads=args.threads, state_dir=args.output_dir,
+                                                         force=force_assembly)
+                if soap127:
+                    gc_val = get_gc_content("soap_env", soap127, args.output_dir, sample_name, "SOAP", "k127", force=force_gc)
+                    busco_data = {}
+                    for lin in lineages:
+                        bdir = os.path.join(busco_dir, f"soap_k127_{lin}")
+                        busco_json = run_busco(soap127, bdir, lin, args.threads, sample_name, "SOAP", "k127",
+                                               state_dir=args.output_dir, force=force_busco)
+                        if busco_json:
+                            busco_data[lin] = parse_busco_json(busco_json)
+                    moll = busco_data.get("mollusca_odb10", {})
+                    euk  = busco_data.get("eukaryota_odb10", {})
+                    row = {
+                        "sample": sample_name,
+                        "assembler": "SOAP",
+                        "config": "k127",
+                        "busco_mollusca": moll.get("complete_percent", 0.0),
+                        "missing_mollusca": moll.get("missing_percent", 0.0),
+                        "busco_eukaryota": euk.get("complete_percent", 0.0),
+                        "missing_eukaryota": euk.get("missing_percent", 0.0),
+                        "n50": max(moll.get("n50",0), euk.get("n50",0)),
+                        "num_contigs": max(moll.get("num_contigs",0), euk.get("num_contigs",0)),
+                        "total_length": max(moll.get("total_length",0), euk.get("total_length",0)),
+                        "gc": gc_val
+                    }
+                    all_results = [r for r in all_results if not(r["sample"]==sample_name and r["assembler"]=="SOAP" and r["config"]=="k127")]
+                    all_results.append(row)
+            else:
+                logger.info(f"✅ Skipping SOAP k=127 for {sample_name}; already completed.")
+    
+       
         else:
             logger.info(f"✅ Skipping SOAP k=127 for {sample_name}; already completed.")
-
-        # 3) MaSuRCA "permissive"
         ckey = f"{sample_name}_MaSuRCA_permissive"
         if ckey not in completed_configs or force_assembly:
             ms_perm = run_masurca(r1, r2, asm_dir, sample_name, "permissive",
@@ -970,7 +1141,7 @@ def main():
                 busco_data = {}
                 for lin in lineages:
                     bdir = os.path.join(busco_dir, f"masurca_permissive_{lin}")
-                    busco_json = run_busco("masurca_env", ms_perm, bdir, lin, args.threads, sample_name, "MaSuRCA", "permissive",
+                    busco_json = run_busco(ms_perm, bdir, lin, args.threads, sample_name, "MaSuRCA", "permissive",
                                            state_dir=args.output_dir, force=force_busco)
                     if busco_json:
                         busco_data[lin] = parse_busco_json(busco_json)
@@ -993,8 +1164,6 @@ def main():
                 all_results.append(row)
         else:
             logger.info(f"✅ Skipping MaSuRCA permissive for {sample_name}; already completed.")
-
-        # 4) MaSuRCA "stringent"
         ckey = f"{sample_name}_MaSuRCA_stringent"
         if ckey not in completed_configs or force_assembly:
             ms_str = run_masurca(r1, r2, asm_dir, sample_name, "stringent",
@@ -1004,7 +1173,7 @@ def main():
                 busco_data = {}
                 for lin in lineages:
                     bdir = os.path.join(busco_dir, f"masurca_stringent_{lin}")
-                    busco_json = run_busco("masurca_env", ms_str, bdir, lin, args.threads, sample_name, "MaSuRCA", "stringent",
+                    busco_json = run_busco(ms_str, bdir, lin, args.threads, sample_name, "MaSuRCA", "stringent",
                                            state_dir=args.output_dir, force=force_busco)
                     if busco_json:
                         busco_data[lin] = parse_busco_json(busco_json)
@@ -1027,8 +1196,6 @@ def main():
                 all_results.append(row)
         else:
             logger.info(f"✅ Skipping MaSuRCA stringent for {sample_name}; already completed.")
-
-        # 5) Captus
         ckey = f"{sample_name}_Captus_WGS"
         if ckey not in completed_configs or force_assembly:
             captus_fa = run_captus_assembly(r1, r2, asm_dir, sample_name, 
@@ -1038,7 +1205,7 @@ def main():
                 busco_data = {}
                 for lin in lineages:
                     bdir = os.path.join(busco_dir, f"captus_wgs_{lin}")
-                    busco_json = run_busco("captus_env", captus_fa, bdir, lin, args.threads, sample_name, "Captus", "WGS",
+                    busco_json = run_busco(captus_fa, bdir, lin, args.threads, sample_name, "Captus", "WGS",
                                            state_dir=args.output_dir, force=force_busco)
                     if busco_json:
                         busco_data[lin] = parse_busco_json(busco_json)
@@ -1062,8 +1229,18 @@ def main():
         else:
             logger.info(f"✅ Skipping Captus WGS for {sample_name}; already completed.")
 
-    # Summaries
-    create_comparison_summary(all_results, args.output_dir)
+    try:
+        create_comparison_summary(all_results, args.output_dir)
+    except ImportError as e:
+        logger.error(f"Error creating comparison summary: {e}")
+        logger.error("Try installing tabulate with: mamba install -y tabulate")
+        # Generate a simple CSV if tabulate is not available
+        csv_path = os.path.join(args.output_dir, "assembly_comparison_summary.csv")
+        if all_results:
+            df = pd.DataFrame(all_results)
+            df = df.sort_values(by=["busco_mollusca", "busco_eukaryota", "n50"], ascending=False)
+            df.to_csv(csv_path, index=False)
+            logger.info(f"Created CSV summary only (without markdown): {csv_path}")
 
     if args.clean_after:
         for sample_name in samples:

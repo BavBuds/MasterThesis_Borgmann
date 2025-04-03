@@ -775,13 +775,21 @@ def main():
             log(f"Combined GVCF already exists: {wholegenome_combined_gvcf}")
             combined_gvcf = wholegenome_combined_gvcf
         else:
-            combine_cmd = f"gatk CombineGVCFs -R {reference_fasta}"
-            for sample, gvcf in cohort_gvcfs:
-                combine_cmd += f" --variant {gvcf}"
-            combine_cmd += f" -O {combined_gvcf}"
-            if not run(combine_cmd)[0]:
-                log(f"Failed to combine GVCFs for cohort {cohort_name}", "ERROR")
-                continue
+            if len(cohort_gvcfs) == 1:
+                sample, gvcf_path = cohort_gvcfs[0]
+                shutil.copy(gvcf_path, combined_gvcf)
+                shutil.copy(gvcf_path + ".tbi", combined_gvcf + ".tbi")
+                log(f"Only one sample in cohort {cohort_name}, copied GVCF directly to: {combined_gvcf}")
+            else:
+                # Combine GVCFs as usual
+                combine_cmd = f"gatk CombineGVCFs -R {reference_fasta}"
+                for sample, gvcf in cohort_gvcfs:
+                    combine_cmd += f" --variant {gvcf}"
+                combine_cmd += f" -O {combined_gvcf}"
+                if not run(combine_cmd)[0]:
+                    log(f"Failed to combine GVCFs for cohort {cohort_name}", "ERROR")
+                    continue
+
         
         # 2. Genotype GVCFs
         allsites_vcf = os.path.join(cohort_dir, f"{cohort_name}.allsites.geno.vcf.gz")
@@ -840,7 +848,29 @@ def main():
         mask_bed = os.path.join(cohort_dir, f"{cohort_name}.final.mask.bed")
         merged_mask_bed = os.path.join(cohort_dir, f"{cohort_name}.final.mask.merged.bed")
         final_mask = merged_mask_bed + ".gz"
-        
+        # 🔧 Filter mask to include only contigs in VCF
+        log(f"Filtering mask to match VCF contigs for cohort {cohort_name}")
+        vcf_chroms_tmp = os.path.join(cohort_dir, "vcf_chroms.txt")
+        mask_filtered_tmp = merged_mask_bed + ".filtered"
+
+        # Extract contigs from VCF
+        vcf_chroms_cmd = f"bcftools query -f '%CHROM\\n' {per_sample_vcfs[0]} | sort | uniq > {vcf_chroms_tmp}"
+        if not run(vcf_chroms_cmd)[0]:
+            log(f"Failed to extract contigs from VCF", "ERROR")
+            continue
+
+        # Filter the merged BED file to only include those contigs
+        filter_mask_cmd = (
+            f"grep -Ff {vcf_chroms_tmp} {merged_mask_bed} > {mask_filtered_tmp}"
+        )
+        if not run(filter_mask_cmd)[0]:
+            log(f"Failed to filter mask BED to VCF contigs", "ERROR")
+            continue
+
+        # Replace original merged mask with filtered version
+        shutil.move(mask_filtered_tmp, merged_mask_bed)
+        log(f"Filtered mask BED now matches VCF contigs")
+
         if os.path.exists(final_mask):
             log(f"Mask file already exists: {final_mask}")
         else:
@@ -851,12 +881,27 @@ def main():
                     log(f"Failed to convert VCF to BED for cohort {cohort_name}", "ERROR")
                     continue
             
+            sorted_mask_bed = mask_bed.replace(".bed", ".sorted.bed")
+            sort_cmd = f"sort -k1,1 -k2,2n {mask_bed} > {sorted_mask_bed}"
+            if not run(sort_cmd)[0]:
+                log(f"Failed to sort BED file for cohort {cohort_name}", "ERROR")
+                continue
+
             # Merge BED intervals
             if not os.path.exists(merged_mask_bed):
-                merge_cmd = f"bedtools merge -i {mask_bed} > {merged_mask_bed}"
+                merge_cmd = f"bedtools merge -i {sorted_mask_bed} > {merged_mask_bed}"
                 if not run(merge_cmd)[0]:
                     log(f"Failed to merge BED intervals for cohort {cohort_name}", "ERROR")
                     continue
+
+                # 🔧 Ensure merged BED is properly sorted before compression (fix for AssertionError)
+                resort_merged = merged_mask_bed.replace(".bed", ".resorted.bed")
+                sort_resort_cmd = f"sort -k1,1 -k2,2n {merged_mask_bed} > {resort_merged}"
+                if not run(sort_resort_cmd)[0]:
+                    log(f"Failed to resort merged BED for cohort {cohort_name}", "ERROR")
+                    continue
+                shutil.move(resort_merged, merged_mask_bed)
+
             
             # Compress mask
             if not run(f"gzip -f {merged_mask_bed}")[0]:
