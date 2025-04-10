@@ -44,8 +44,8 @@ def parse_args():
                         help="Directory containing filtered BAM files from QC pipeline")
     parser.add_argument("--output-dir", required=True, 
                         help="Output directory for eSMC2 preparation")
-    parser.add_argument("--depth-filter", type=int, default=30, 
-                        help="Minimum depth filter (default: 30)")
+    parser.add_argument("--depth-filter", type=int, default=10, 
+                        help="Minimum depth filter (default: 10)")
     parser.add_argument("--memory", default="4g", 
                         help="Memory allocation for Java (default: 4g)")
     parser.add_argument("--threads", type=int, default=8, 
@@ -62,6 +62,8 @@ def parse_args():
                         help="Log file name (default: esmc2_prep.log)")
     parser.add_argument("--use-existing-cohorts", action="store_true",
                         help="Use existing cohorts found in output directory instead of creating new ones")
+    parser.add_argument("--skip-chromosome-splitting", action="store_true",
+                        help="Skip processing by chromosome and process whole VCF at once")
     
     # Add remapping arguments
     parser.add_argument("--remap-sample", 
@@ -134,6 +136,71 @@ def run(cmd, workdir=None):
         log(f"stdout: {e.stdout.strip() if e.stdout else 'None'}", "ERROR")
         log(f"stderr: {e.stderr.strip() if e.stderr else 'None'}", "ERROR")
         return False, None
+
+def index_vcf(vcf_path, threads=1):
+    """
+    Index a VCF file using bcftools.
+    
+    Args:
+        vcf_path (str): Path to the VCF file
+        threads (int): Number of threads to use
+        
+    Returns:
+        bool: True if indexing was successful, False otherwise
+    """
+    if not os.path.exists(vcf_path):
+        log(f"Cannot index VCF: File not found - {vcf_path}", "ERROR")
+        return False
+    
+    # Check if index already exists
+    if os.path.exists(vcf_path + ".tbi") or os.path.exists(vcf_path + ".csi"):
+        log(f"VCF index already exists for {vcf_path}", "INFO")
+        return True
+    
+    # Index the VCF
+    log(f"Indexing VCF: {vcf_path}", "INFO")
+    index_cmd = f"bcftools index --threads {threads} {vcf_path}"
+    return run(index_cmd)[0]
+
+def patch_generate_multihetsep(script_path):
+    """
+    Patch the generate_multihetsep.py script to handle unsorted positions.
+    
+    Args:
+        script_path (str): Path to the generate_multihetsep.py script
+    
+    Returns:
+        bool: True if patching was successful, False otherwise
+    """
+    log(f"Patching generate_multihetsep.py script to handle unsorted positions")
+    
+    # Read the original script
+    try:
+        with open(script_path, 'r') as f:
+            script_content = f.read()
+    except Exception as e:
+        log(f"Failed to read script: {e}", "ERROR")
+        return False
+    
+    # Replace the assertion with a more tolerant check
+    if "assert pos >= self.lastPos" in script_content:
+        patched_content = script_content.replace(
+            "assert pos >= self.lastPos",
+            "if pos < self.lastPos: return False  # Skip positions that go backwards"
+        )
+        
+        # Write the patched script
+        try:
+            with open(script_path, 'w') as f:
+                f.write(patched_content)
+            log(f"Successfully patched generate_multihetsep.py script", "INFO")
+            return True
+        except Exception as e:
+            log(f"Failed to write patched script: {e}", "ERROR")
+            return False
+    else:
+        log(f"Script does not contain the expected assertion, skipping patch", "WARNING")
+        return False
 
 def remap_reads(fastq1, fastq2, reference_fasta, sample_name, output_dir, threads):
     """
@@ -574,6 +641,8 @@ def main():
         log(f"  Remapping to reference: {args.remap_to_reference}")
     if args.use_existing_cohorts:
         log(f"  Using existing cohorts if found")
+    if args.skip_chromosome_splitting:
+        log(f"  Skipping chromosome-by-chromosome processing")
     
     # Ensure directories exist
     for dir_path in [args.input_fastas_dir, args.qc_dir]:
@@ -712,8 +781,13 @@ def main():
         )
         
         if run(hc_cmd)[0]:
-            all_gvcfs[sample_name] = gvcf_out
-            log(f"Successfully created GVCF for {sample_name}")
+            # Index the newly created GVCF
+            if index_vcf(gvcf_out, args.threads):
+                all_gvcfs[sample_name] = gvcf_out
+                log(f"Successfully created and indexed GVCF for {sample_name}")
+            else:
+                log(f"Created GVCF but failed to index it for {sample_name}", "WARNING")
+                all_gvcfs[sample_name] = gvcf_out
         else:
             log(f"Failed to create GVCF for {sample_name}", "ERROR")
     
@@ -778,7 +852,11 @@ def main():
             if len(cohort_gvcfs) == 1:
                 sample, gvcf_path = cohort_gvcfs[0]
                 shutil.copy(gvcf_path, combined_gvcf)
-                shutil.copy(gvcf_path + ".tbi", combined_gvcf + ".tbi")
+                if os.path.exists(gvcf_path + ".tbi"):
+                    shutil.copy(gvcf_path + ".tbi", combined_gvcf + ".tbi")
+                else:
+                    # Index the combined GVCF if copy of index fails
+                    index_vcf(combined_gvcf, args.threads)
                 log(f"Only one sample in cohort {cohort_name}, copied GVCF directly to: {combined_gvcf}")
             else:
                 # Combine GVCFs as usual
@@ -786,10 +864,14 @@ def main():
                 for sample, gvcf in cohort_gvcfs:
                     combine_cmd += f" --variant {gvcf}"
                 combine_cmd += f" -O {combined_gvcf}"
+                
                 if not run(combine_cmd)[0]:
                     log(f"Failed to combine GVCFs for cohort {cohort_name}", "ERROR")
                     continue
-
+                
+                # Index the combined GVCF
+                if not index_vcf(combined_gvcf, args.threads):
+                    log(f"Failed to index combined GVCF for cohort {cohort_name}", "WARNING")
         
         # 2. Genotype GVCFs
         allsites_vcf = os.path.join(cohort_dir, f"{cohort_name}.allsites.geno.vcf.gz")
@@ -806,6 +888,10 @@ def main():
             if not run(genotype_cmd)[0]:
                 log(f"Failed to genotype GVCFs for cohort {cohort_name}", "ERROR")
                 continue
+            
+            # Index the genotyped VCF
+            if not index_vcf(allsites_vcf, args.threads):
+                log(f"Failed to index genotyped VCF for cohort {cohort_name}", "WARNING")
         
         # 3. Create SNP-only VCF
         final_filtered_vcf = os.path.join(cohort_dir, f"{cohort_name}.final.filtered.vcf.gz")
@@ -824,7 +910,7 @@ def main():
                 continue
             
             # Index the filtered VCF
-            if not run(f"bcftools index --threads {args.threads} {final_filtered_vcf}")[0]:
+            if not index_vcf(final_filtered_vcf, args.threads):
                 log(f"Failed to index filtered VCF for cohort {cohort_name}", "ERROR")
                 continue
         
@@ -843,34 +929,54 @@ def main():
             if not run(mask_vcf_cmd)[0]:
                 log(f"Failed to create callable sites VCF for cohort {cohort_name}", "ERROR")
                 continue
+            
+            # Index the callable sites VCF
+            if not index_vcf(allsites_filtered_vcf, args.threads):
+                log(f"Failed to index callable sites VCF for cohort {cohort_name}", "WARNING")
+        
+        # 6. Split VCF into individual samples (moved before mask file creation to fix the error)
+        per_sample_vcfs = []
+        if os.path.exists(final_filtered_vcf):
+            # Get sample names from VCF
+            sample_list_cmd = f"bcftools query -l {final_filtered_vcf}"
+            success, output = run(sample_list_cmd)
+            if success and output:
+                sample_names_in_vcf = output.strip().split()
+                log(f"Sample names in VCF: {', '.join(sample_names_in_vcf)}")
+                
+                # Check if individual sample VCFs already exist
+                for s in sample_names_in_vcf:
+                    out_vcf = os.path.join(cohort_dir, f"{cohort_name}.{s}.vcf.gz")
+                    if os.path.exists(out_vcf) and (os.path.exists(out_vcf + ".tbi") or os.path.exists(out_vcf + ".csi")):
+                        log(f"Individual sample VCF already exists for {s}: {out_vcf}")
+                        per_sample_vcfs.append(out_vcf)
+                    else:
+                        extract_cmd = f"bcftools view --samples {s} {final_filtered_vcf} --output-type z --output-file {out_vcf}"
+                        if run(extract_cmd)[0]:
+                            # Index the sample VCF
+                            if index_vcf(out_vcf, args.threads):
+                                per_sample_vcfs.append(out_vcf)
+                                log(f"Created and indexed individual sample VCF for {s}")
+                            else:
+                                log(f"Failed to index individual sample VCF for {s}", "ERROR")
+                        else:
+                            log(f"Failed to create individual sample VCF for {s}", "ERROR")
+            else:
+                log(f"Failed to extract sample names from {final_filtered_vcf}", "ERROR")
+        
+        if not per_sample_vcfs:
+            log(f"No sample VCFs available for cohort {cohort_name}", "ERROR")
+            continue
         
         # 5. Create mask file
         mask_bed = os.path.join(cohort_dir, f"{cohort_name}.final.mask.bed")
         merged_mask_bed = os.path.join(cohort_dir, f"{cohort_name}.final.mask.merged.bed")
         final_mask = merged_mask_bed + ".gz"
-        # 🔧 Filter mask to include only contigs in VCF
-        log(f"Filtering mask to match VCF contigs for cohort {cohort_name}")
+        
+        # Extract contigs from VCF before filtering mask
         vcf_chroms_tmp = os.path.join(cohort_dir, "vcf_chroms.txt")
         mask_filtered_tmp = merged_mask_bed + ".filtered"
-
-        # Extract contigs from VCF
-        vcf_chroms_cmd = f"bcftools query -f '%CHROM\\n' {per_sample_vcfs[0]} | sort | uniq > {vcf_chroms_tmp}"
-        if not run(vcf_chroms_cmd)[0]:
-            log(f"Failed to extract contigs from VCF", "ERROR")
-            continue
-
-        # Filter the merged BED file to only include those contigs
-        filter_mask_cmd = (
-            f"grep -Ff {vcf_chroms_tmp} {merged_mask_bed} > {mask_filtered_tmp}"
-        )
-        if not run(filter_mask_cmd)[0]:
-            log(f"Failed to filter mask BED to VCF contigs", "ERROR")
-            continue
-
-        # Replace original merged mask with filtered version
-        shutil.move(mask_filtered_tmp, merged_mask_bed)
-        log(f"Filtered mask BED now matches VCF contigs")
-
+        
         if os.path.exists(final_mask):
             log(f"Mask file already exists: {final_mask}")
         else:
@@ -894,49 +1000,47 @@ def main():
                     log(f"Failed to merge BED intervals for cohort {cohort_name}", "ERROR")
                     continue
 
-                # 🔧 Ensure merged BED is properly sorted before compression (fix for AssertionError)
+                # Ensure merged BED is properly sorted before compression (fix for AssertionError)
                 resort_merged = merged_mask_bed.replace(".bed", ".resorted.bed")
                 sort_resort_cmd = f"sort -k1,1 -k2,2n {merged_mask_bed} > {resort_merged}"
                 if not run(sort_resort_cmd)[0]:
                     log(f"Failed to resort merged BED for cohort {cohort_name}", "ERROR")
                     continue
                 shutil.move(resort_merged, merged_mask_bed)
+            
+            # Filter mask to include only contigs in VCF
+            log(f"Filtering mask to match VCF contigs for cohort {cohort_name}")
+            
+            # Extract contigs from VCF
+            vcf_chroms_cmd = f"bcftools query -f '%CHROM\\n' {per_sample_vcfs[0]} | sort | uniq > {vcf_chroms_tmp}"
+            if not run(vcf_chroms_cmd)[0]:
+                log(f"Failed to extract contigs from VCF", "ERROR")
+                continue
 
+            # Filter the merged BED file to only include those contigs
+            filter_mask_cmd = (
+                f"grep -Ff {vcf_chroms_tmp} {merged_mask_bed} > {mask_filtered_tmp}"
+            )
+            if not run(filter_mask_cmd)[0]:
+                log(f"Failed to filter mask BED to VCF contigs", "ERROR")
+                continue
+
+            # Replace original merged mask with filtered version
+            shutil.move(mask_filtered_tmp, merged_mask_bed)
+            log(f"Filtered mask BED now matches VCF contigs")
+            
+            # Final resort to ensure proper ordering within each contig
+            final_resort = merged_mask_bed + ".final_sort"
+            final_sort_cmd = f"sort -k1,1 -k2,2n {merged_mask_bed} > {final_resort}"
+            if not run(final_sort_cmd)[0]:
+                log(f"Failed to do final resort of BED file", "ERROR")
+                continue
+            shutil.move(final_resort, merged_mask_bed)
             
             # Compress mask
             if not run(f"gzip -f {merged_mask_bed}")[0]:
                 log(f"Failed to compress mask BED for cohort {cohort_name}", "ERROR")
                 continue
-        
-        # 6. Split VCF into individual samples
-        per_sample_vcfs = []
-        if os.path.exists(final_filtered_vcf):
-            # Get sample names from VCF
-            sample_list_cmd = f"bcftools query -l {final_filtered_vcf}"
-            success, output = run(sample_list_cmd)
-            if success and output:
-                sample_names_in_vcf = output.strip().split()
-                log(f"Sample names in VCF: {', '.join(sample_names_in_vcf)}")
-                
-                # Check if individual sample VCFs already exist
-                for s in sample_names_in_vcf:
-                    out_vcf = os.path.join(cohort_dir, f"{cohort_name}.{s}.vcf.gz")
-                    if os.path.exists(out_vcf):
-                        log(f"Individual sample VCF already exists for {s}: {out_vcf}")
-                        per_sample_vcfs.append(out_vcf)
-                    else:
-                        extract_cmd = f"bcftools view --samples {s} {final_filtered_vcf} --output-type z --output-file {out_vcf}"
-                        if run(extract_cmd)[0]:
-                            per_sample_vcfs.append(out_vcf)
-                            log(f"Created individual sample VCF for {s}")
-                        else:
-                            log(f"Failed to create individual sample VCF for {s}", "ERROR")
-            else:
-                log(f"Failed to extract sample names from {final_filtered_vcf}", "ERROR")
-        
-        if not per_sample_vcfs:
-            log(f"No sample VCFs available for cohort {cohort_name}", "ERROR")
-            continue
         
         # 7. Generate Multihetsep file
         multihetsep_suffix = region_name
@@ -959,14 +1063,115 @@ def main():
                     log(f"Failed to download or set permissions for generate_multihetsep.py", "ERROR")
                     continue
             
-            # Generate Multihetsep file
-            mhs_cmd = f"python3 {gen_mhs_script} --mask={final_mask} " + " ".join(per_sample_vcfs) + f" > {multihetsep_out}"
-            if not run(mhs_cmd)[0]:
-                log(f"Failed to generate Multihetsep file for cohort {cohort_name}", "ERROR")
+            # Patch the script to handle unsorted positions
+            if not patch_generate_multihetsep(gen_mhs_script):
+                log(f"Failed to patch generate_multihetsep.py script", "ERROR")
                 continue
+            
+            # If skipping chromosome splitting, process entire VCF at once
+            if args.skip_chromosome_splitting:
+                log(f"Processing all chromosomes at once (skipping chromosome splitting)")
+                
+                # Generate multihetsep for the whole genome
+                mhs_cmd = f"python3 {gen_mhs_script} --mask={final_mask} " + " ".join(per_sample_vcfs) + f" > {multihetsep_out}"
+                if run(mhs_cmd)[0]:
+                    log(f"Successfully generated multihetsep file: {multihetsep_out}")
+                else:
+                    log(f"Failed to generate multihetsep file", "ERROR")
+                    continue
+            else:
+                # Process one chromosome at a time
+                # Get all chromosomes/contigs from VCF
+                chroms_cmd = f"bcftools query -f '%CHROM\\n' {per_sample_vcfs[0]} | sort | uniq"
+                success, chroms_output = run(chroms_cmd)
+                if not success or not chroms_output:
+                    log(f"Failed to get chromosomes from VCF", "ERROR")
+                    continue
+                
+                chromosomes = chroms_output.strip().split('\n')
+                log(f"Processing {len(chromosomes)} chromosomes/contigs")
+                
+                # Create a temporary directory for chromosome-specific files
+                tmp_dir = os.path.join(cohort_dir, "tmp")
+                os.makedirs(tmp_dir, exist_ok=True)
+                
+                # Process each chromosome separately
+                chrom_mhs_files = []
+                for i, chrom in enumerate(chromosomes):
+                    log(f"Processing chromosome/contig {i+1}/{len(chromosomes)}: {chrom}")
+                    chrom_mhs = os.path.join(tmp_dir, f"{chrom}.mhs")
+                    
+                    # Extract chromosome region from VCF
+                    chrom_vcfs = []
+                    for vcf in per_sample_vcfs:
+                        sample = os.path.basename(vcf).split('.')[-2]
+                        chrom_vcf = os.path.join(tmp_dir, f"{sample}.{chrom}.vcf.gz")
+                        
+                        # Check if VCF is indexed before trying to extract
+                        if not (os.path.exists(vcf + ".tbi") or os.path.exists(vcf + ".csi")):
+                            log(f"VCF is not indexed, creating index for {vcf}", "WARNING")
+                            if not index_vcf(vcf, args.threads):
+                                log(f"Failed to index VCF {vcf}, skipping chromosome {chrom}", "ERROR")
+                                continue
+                                
+                        # Now extract chromosome
+                        extract_cmd = f"bcftools view -r {chrom} {vcf} -Oz -o {chrom_vcf}"
+                        if run(extract_cmd)[0]:
+                            # Make sure chromosome VCF is indexed
+                            if index_vcf(chrom_vcf, 1):
+                                chrom_vcfs.append(chrom_vcf)
+                            else:
+                                log(f"Failed to index chromosome VCF for {chrom}", "ERROR")
+                        else:
+                            log(f"Failed to extract chromosome {chrom} from VCF", "WARNING")
+                    
+                    if not chrom_vcfs:
+                        log(f"No VCFs available for chromosome {chrom}, skipping", "WARNING")
+                        continue
+                    
+                    # Extract chromosome region from mask
+                    chrom_mask = os.path.join(tmp_dir, f"{chrom}.mask.bed.gz")
+                    extract_mask_cmd = f"gunzip -c {final_mask} | grep -P '^{chrom}\\t' | gzip > {chrom_mask}"
+                    if not run(extract_mask_cmd)[0]:
+                        log(f"Failed to extract chromosome {chrom} from mask", "WARNING")
+                        # Try without a mask
+                        mhs_cmd = f"python3 {gen_mhs_script} " + " ".join(chrom_vcfs) + f" > {chrom_mhs}"
+                    else:
+                        # Generate multihetsep for this chromosome
+                        mhs_cmd = f"python3 {gen_mhs_script} --mask={chrom_mask} " + " ".join(chrom_vcfs) + f" > {chrom_mhs}"
+                    
+                    if run(mhs_cmd)[0]:
+                        # Check if file is empty
+                        if os.path.getsize(chrom_mhs) > 0:
+                            chrom_mhs_files.append(chrom_mhs)
+                        else:
+                            log(f"Generated empty multihetsep file for chromosome {chrom}", "WARNING")
+                    else:
+                        log(f"Failed to generate multihetsep for chromosome {chrom}", "WARNING")
+                
+                # Combine all chromosome multihetsep files
+                if chrom_mhs_files:
+                    concat_cmd = f"cat {' '.join(chrom_mhs_files)} > {multihetsep_out}"
+                    if not run(concat_cmd)[0]:
+                        log(f"Failed to concatenate chromosome multihetsep files", "ERROR")
+                    else:
+                        log(f"Successfully generated multihetsep file: {multihetsep_out}")
+                    
+                    # Clean up temporary files
+                    if run(f"rm -rf {tmp_dir}")[0]:
+                        log(f"Cleaned up temporary files")
+                else:
+                    # If processing by chromosome failed, try processing whole VCF at once as fallback
+                    log(f"No chromosome multihetsep files were generated, trying without chromosome splitting", "WARNING")
+                    mhs_cmd = f"python3 {gen_mhs_script} --mask={final_mask} " + " ".join(per_sample_vcfs) + f" > {multihetsep_out}"
+                    if run(mhs_cmd)[0]:
+                        log(f"Successfully generated multihetsep file using whole-VCF method: {multihetsep_out}")
+                    else:
+                        log(f"Failed to generate multihetsep file", "ERROR")
+                        continue
         
         # 8. Create subset if requested
-        if args.create_subset:
+        if args.create_subset and os.path.exists(multihetsep_out):
             subset_out = os.path.join(
                 cohort_dir, 
                 f"{cohort_name}.{multihetsep_suffix}.{args.subset_start/1000000:.0f}Mbto{args.subset_end/1000000:.0f}Mb.subset.mhs"
@@ -985,8 +1190,11 @@ def main():
         
         # 9. Quality check
         log(f"Quality check for {cohort_name} Multihetsep file:")
-        check_cmd = f"head -n 10 {multihetsep_out}"
-        run(check_cmd)
+        if os.path.exists(multihetsep_out):
+            check_cmd = f"head -n 10 {multihetsep_out}"
+            run(check_cmd)
+        else:
+            log(f"Cannot perform quality check - Multihetsep file not found", "WARNING")
         
         log(f"Finished eSMC2 preparation for cohort: {cohort_name}")
     

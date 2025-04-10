@@ -19,9 +19,9 @@ import subprocess
 import concurrent.futures
 import logging
 import time
-import shutil
+
 import glob
-from pathlib import Path
+
 
 class PSMCPipeline:
     """

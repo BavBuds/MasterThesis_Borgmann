@@ -28,14 +28,12 @@ import os
 import subprocess
 import logging
 import sys
-from Bio import SeqIO
+
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 import matplotlib.gridspec as gridspec
-from matplotlib.colors import LinearSegmentedColormap
-import seaborn as sns
-from matplotlib.ticker import FuncFormatter
+
 
 # Set up logging
 def setup_logging(log_directory, log_filename="pipeline.log"):
@@ -317,7 +315,7 @@ def filter_bam(sample, raw_bam, filtered_bam):
     if data_type == "ONT":
         # Filter out secondary + supplementary
         # -F 0x900 means: skip reads with either 0x100 or 0x800 bits set
-        logger.debug(f"Applying ONT-specific filtering: removing secondary/supplementary alignments")
+        logger.debug("Applying ONT-specific filtering: removing secondary/supplementary alignments")
         cmd_filter = f"samtools view -@ {NUM_THREADS} -F 0x900 -b {raw_bam} -o {filtered_bam}"
         if not run(cmd_filter):
             logger.error(f"ONT filtering failed for {sample}")
@@ -325,37 +323,37 @@ def filter_bam(sample, raw_bam, filtered_bam):
 
     elif data_type == "ILLUMINA":
         # (1) Optionally mark duplicates
-        logger.debug(f"Applying Illumina-specific processing: marking duplicates")
+        logger.debug("Applying Illumina-specific processing: marking duplicates")
         
         # 1a. Sort by name for fixmates
-        logger.debug(f"Name-sorting BAM for fixmate")
+        logger.debug("Name-sorting BAM for fixmate")
         cmd_sort_name = f"samtools sort -@ {NUM_THREADS} -n {raw_bam} -o {temp_bam}"
         if not run(cmd_sort_name):
             logger.error(f"Name sorting failed for {sample}")
             return None
 
-        logger.debug(f"Running fixmate")
+        logger.debug("Running fixmate")
         cmd_fixmate = f"samtools fixmate -@ {NUM_THREADS} -m {temp_bam} {temp_bam}.fixmate.bam"
         if not run(cmd_fixmate):
             logger.error(f"Fixmate failed for {sample}")
             return None
         
         # 1c. Sort by coordinate
-        logger.debug(f"Coordinate-sorting BAM")
+        logger.debug("Coordinate-sorting BAM")
         cmd_sort_coord = f"samtools sort -@ {NUM_THREADS} {temp_bam}.fixmate.bam -o {temp_bam}.sorted.bam"
         if not run(cmd_sort_coord):
             logger.error(f"Coordinate sorting failed for {sample}")
             return None
         
         # 1d. Mark duplicates
-        logger.debug(f"Marking duplicates")
+        logger.debug("Marking duplicates")
         cmd_markdup = f"samtools markdup -@ {NUM_THREADS} {temp_bam}.sorted.bam {temp_bam}.markdup.bam"
         if not run(cmd_markdup):
             logger.error(f"Marking duplicates failed for {sample}")
             return None
 
         # 2. Remove duplicates ( -F 0x400 ) and secondary/supp ( -F 0x900 )
-        logger.debug(f"Filtering out duplicates and secondary/supplementary alignments")
+        logger.debug("Filtering out duplicates and secondary/supplementary alignments")
         cmd_view = (
             "samtools view -@ {threads} -b -F 0x400 -F 0x900 {inbam} -o {outbam}"
             .format(
@@ -369,7 +367,7 @@ def filter_bam(sample, raw_bam, filtered_bam):
             return None
 
         # Cleanup
-        logger.debug(f"Cleaning up temporary files")
+        logger.debug("Cleaning up temporary files")
         for f in [temp_bam, f"{temp_bam}.fixmate.bam", f"{temp_bam}.sorted.bam", f"{temp_bam}.markdup.bam"]:
             if os.path.exists(f):
                 os.remove(f)
@@ -394,14 +392,14 @@ def sort_and_index_bam(sample, filtered_bam, final_bam):
     logger.info(f"📚 Sorting & indexing filtered BAM for {sample}")
     
     # Sort BAM
-    logger.debug(f"Sorting BAM file")
+    logger.debug("Sorting BAM file")
     cmd_sort = f"samtools sort -@ {NUM_THREADS} {filtered_bam} -o {final_bam}"
     if not run(cmd_sort):
         logger.error(f"BAM sorting failed for {sample}")
         return None
     
     # Index BAM
-    logger.debug(f"Indexing BAM file")
+    logger.debug("Indexing BAM file")
     cmd_index = f"samtools index -@ {NUM_THREADS} {final_bam}"
     if not run(cmd_index):
         logger.error(f"BAM indexing failed for {sample}")
@@ -523,7 +521,7 @@ def filter_variants(sample, raw_vcf, filtered_vcf):
             logger.error(f"Variant filtering failed for {sample}")
             return False
             
-        logger.debug(f"Indexing filtered VCF")
+        logger.debug("Indexing filtered VCF")
         index_success = run(f"bcftools index --threads {NUM_THREADS} {filtered_vcf}")
         if not index_success:
             logger.error(f"Filtered VCF indexing failed for {sample}")
@@ -581,9 +579,9 @@ logger.info("=============================================\n")
 
 results = {}
 for sample in samples:
-    logger.info(f"\n=======================")
+    logger.info("\n=======================")
     logger.info(f"🚀 Processing sample: {sample}")
-    logger.info(f"=======================\n")
+    logger.info("=======================\n")
 
     assembly = samples[sample]["assembly"]
     mapper = samples[sample]["mapper"]
