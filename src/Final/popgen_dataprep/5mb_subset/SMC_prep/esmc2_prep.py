@@ -7,7 +7,6 @@ import glob
 import re
 import time
 import json
-import tempfile
 from datetime import datetime
 
 def check_dependencies():
