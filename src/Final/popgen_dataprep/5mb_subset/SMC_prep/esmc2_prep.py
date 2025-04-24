@@ -45,8 +45,8 @@ def parse_args():
                         help="Output directory for eSMC2 preparation")
     parser.add_argument("--depth-filter", type=int, default=10, 
                         help="Minimum depth filter (default: 10)")
-    parser.add_argument("--memory", default="4g", 
-                        help="Memory allocation for Java (default: 4g)")
+    parser.add_argument("--memory", default="16g", 
+                        help="Memory allocation for Java (default: 16g)")
     parser.add_argument("--threads", type=int, default=8, 
                         help="Number of threads (default: 8)")
     parser.add_argument("--region", 
@@ -63,6 +63,8 @@ def parse_args():
                         help="Use existing cohorts found in output directory instead of creating new ones")
     parser.add_argument("--skip-chromosome-splitting", action="store_true",
                         help="Skip processing by chromosome and process whole VCF at once")
+ 
+
     
     # Add remapping arguments
     parser.add_argument("--remap-sample", 
@@ -75,8 +77,49 @@ def parse_args():
                         help="Path to reference FASTA for remapping")
     parser.add_argument("--remap-output-dir", 
                         help="Directory for remapped output (default: <output-dir>/<cohort-name>)")
+    parser.add_argument('--override-ref',  action='append',
+                    help='sample_id:/full/path/to/new_reference.fasta')
+    parser.add_argument('--override-bam',  action='append',
+                    help='sample_id:/full/path/to/filtered_or_fixed.bam')
+
     
     return parser.parse_args()
+
+
+def parse_override_args(override_list):
+    """
+    Parse override arguments in the format 'sample_id:/path/to/file'.
+    
+    Args:
+        override_list (list): List of override arguments
+        
+    Returns:
+        dict: Dictionary of {sample_id: file_path} overrides
+    """
+    overrides = {}
+    if not override_list:
+        return overrides
+        
+    for override in override_list:
+        try:
+            sample_id, file_path = override.split(':', 1)
+            sample_id = sample_id.strip()
+            file_path = file_path.strip()
+            
+            if not sample_id or not file_path:
+                log(f"Invalid override format: {override}. Expected 'sample_id:/path/to/file'", "WARNING")
+                continue
+                
+            if not os.path.exists(file_path):
+                log(f"Warning: File does not exist: {file_path}", "WARNING")
+                
+            overrides[sample_id] = file_path
+            log(f"Override set for {sample_id}: {file_path}", "INFO")
+        except ValueError:
+            log(f"Invalid override format: {override}. Expected 'sample_id:/path/to/file'", "WARNING")
+            
+    return overrides
+
 
 def setup_logging(log_file):
     """Set up logging to both console and file."""
@@ -162,44 +205,36 @@ def index_vcf(vcf_path, threads=1):
     return run(index_cmd)[0]
 
 def patch_generate_multihetsep(script_path):
-    """
-    Patch the generate_multihetsep.py script to handle unsorted positions.
-    
-    Args:
-        script_path (str): Path to the generate_multihetsep.py script
-    
-    Returns:
-        bool: True if patching was successful, False otherwise
-    """
-    log(f"Patching generate_multihetsep.py script to handle unsorted positions")
-    
-    # Read the original script
+    log("Patching generate_multihetsep.py script to handle unsorted positions")
+
     try:
-        with open(script_path, 'r') as f:
-            script_content = f.read()
+        with open(script_path, "r") as f:
+            script = f.read()
     except Exception as e:
-        log(f"Failed to read script: {e}", "ERROR")
+        log(f"Cannot read script: {e}", "ERROR")
         return False
-    
-    # Replace the assertion with a more tolerant check
-    if "assert pos >= self.lastPos" in script_content:
-        patched_content = script_content.replace(
+
+    if "if pos < self.lastPos" in script:
+        log("Patch already present – nothing to do.", "INFO")
+        return True          # ← let the pipeline proceed
+
+    if "assert pos >= self.lastPos" in script:
+        patched = script.replace(
             "assert pos >= self.lastPos",
             "if pos < self.lastPos: return False  # Skip positions that go backwards"
         )
-        
-        # Write the patched script
         try:
-            with open(script_path, 'w') as f:
-                f.write(patched_content)
-            log(f"Successfully patched generate_multihetsep.py script", "INFO")
+            with open(script_path, "w") as f:
+                f.write(patched)
+            log("Successfully patched generate_multihetsep.py", "INFO")
             return True
         except Exception as e:
-            log(f"Failed to write patched script: {e}", "ERROR")
+            log(f"Write failed: {e}", "ERROR")
             return False
-    else:
-        log(f"Script does not contain the expected assertion, skipping patch", "WARNING")
-        return False
+
+    log("Unknown script structure – skipping patch but continuing.", "INFO")
+    return True
+
 
 def remap_reads(fastq1, fastq2, reference_fasta, sample_name, output_dir, threads):
     """
@@ -622,7 +657,7 @@ def main():
     start_time = setup_logging(log_file)
     
     # Print configuration
-    log(f"Configuration:")
+    log("Configuration:")
     log(f"  Input fastas directory: {args.input_fastas_dir}")
     log(f"  QC directory: {args.qc_dir}")
     log(f"  Output directory: {args.output_dir}")
@@ -639,9 +674,13 @@ def main():
         log(f"  Remapping FASTQ2: {args.remap_fastq2}")
         log(f"  Remapping to reference: {args.remap_to_reference}")
     if args.use_existing_cohorts:
-        log(f"  Using existing cohorts if found")
+        log("  Using existing cohorts if found")
     if args.skip_chromosome_splitting:
-        log(f"  Skipping chromosome-by-chromosome processing")
+        log("  Skipping chromosome-by-chromosome processing")
+    if args.override_ref:
+        log(f"  Reference overrides requested: {len(args.override_ref)}")
+    if args.override_bam:
+        log(f"  BAM overrides requested: {len(args.override_bam)}")
     
     # Ensure directories exist
     for dir_path in [args.input_fastas_dir, args.qc_dir]:
@@ -669,6 +708,32 @@ def main():
         return 1
     
     log(f"Found {len(filtered_bams)} filtered BAM files")
+    
+    # Apply reference fasta overrides
+    if args.override_ref:
+        ref_overrides = parse_override_args(args.override_ref)
+        for sample_id, ref_path in ref_overrides.items():
+            if os.path.exists(ref_path):
+                reference_fastas[sample_id] = ref_path
+                log(f"Overriding reference for {sample_id} with {ref_path}", "INFO")
+                
+                # Make sure the override reference is indexed
+                if index_reference_fasta(ref_path):
+                    log(f"Successfully indexed override reference for {sample_id}", "INFO")
+                else:
+                    log(f"Failed to index override reference for {sample_id}", "WARNING")
+            else:
+                log(f"Override reference file does not exist: {ref_path}", "ERROR")
+    
+    # Apply BAM file overrides
+    if args.override_bam:
+        bam_overrides = parse_override_args(args.override_bam)
+        for sample_id, bam_path in bam_overrides.items():
+            if os.path.exists(bam_path):
+                filtered_bams[sample_id] = bam_path
+                log(f"Overriding BAM for {sample_id} with {bam_path}", "INFO")
+            else:
+                log(f"Override BAM file does not exist: {bam_path}", "ERROR")
     
     # Handle remapping if requested
     if args.remap_sample and args.remap_fastq1 and args.remap_fastq2 and args.remap_to_reference:
@@ -1013,7 +1078,7 @@ def main():
             # Extract contigs from VCF
             vcf_chroms_cmd = f"bcftools query -f '%CHROM\\n' {per_sample_vcfs[0]} | sort | uniq > {vcf_chroms_tmp}"
             if not run(vcf_chroms_cmd)[0]:
-                log(f"Failed to extract contigs from VCF", "ERROR")
+                log("Failed to extract contigs from VCF", "ERROR")
                 continue
 
             # Filter the merged BED file to only include those contigs
@@ -1021,18 +1086,18 @@ def main():
                 f"grep -Ff {vcf_chroms_tmp} {merged_mask_bed} > {mask_filtered_tmp}"
             )
             if not run(filter_mask_cmd)[0]:
-                log(f"Failed to filter mask BED to VCF contigs", "ERROR")
+                log("Failed to filter mask BED to VCF contigs", "ERROR")
                 continue
 
             # Replace original merged mask with filtered version
             shutil.move(mask_filtered_tmp, merged_mask_bed)
-            log(f"Filtered mask BED now matches VCF contigs")
+            log("Filtered mask BED now matches VCF contigs")
             
             # Final resort to ensure proper ordering within each contig
             final_resort = merged_mask_bed + ".final_sort"
             final_sort_cmd = f"sort -k1,1 -k2,2n {merged_mask_bed} > {final_resort}"
             if not run(final_sort_cmd)[0]:
-                log(f"Failed to do final resort of BED file", "ERROR")
+                log("Failed to do final resort of BED file", "ERROR")
                 continue
             shutil.move(final_resort, merged_mask_bed)
             
@@ -1056,27 +1121,27 @@ def main():
             # Download generate_multihetsep.py script if needed
             gen_mhs_script = os.path.join(cohort_dir, "generate_multihetsep.py")
             if not os.path.exists(gen_mhs_script):
-                log(f"Downloading generate_multihetsep.py script")
+                log("Downloading generate_multihetsep.py script")
                 wget_cmd = f"wget -O {gen_mhs_script} https://raw.githubusercontent.com/stschiff/msmc-tools/master/generate_multihetsep.py"
                 if not run(wget_cmd)[0] or not run(f"chmod u+x {gen_mhs_script}")[0]:
-                    log(f"Failed to download or set permissions for generate_multihetsep.py", "ERROR")
+                    log("Failed to download or set permissions for generate_multihetsep.py", "ERROR")
                     continue
             
             # Patch the script to handle unsorted positions
             if not patch_generate_multihetsep(gen_mhs_script):
-                log(f"Failed to patch generate_multihetsep.py script", "ERROR")
+                log("Failed to patch generate_multihetsep.py script", "ERROR")
                 continue
             
             # If skipping chromosome splitting, process entire VCF at once
             if args.skip_chromosome_splitting:
-                log(f"Processing all chromosomes at once (skipping chromosome splitting)")
+                log("Processing all chromosomes at once (skipping chromosome splitting)")
                 
                 # Generate multihetsep for the whole genome
                 mhs_cmd = f"python3 {gen_mhs_script} --mask={final_mask} " + " ".join(per_sample_vcfs) + f" > {multihetsep_out}"
                 if run(mhs_cmd)[0]:
                     log(f"Successfully generated multihetsep file: {multihetsep_out}")
                 else:
-                    log(f"Failed to generate multihetsep file", "ERROR")
+                    log("Failed to generate multihetsep file", "ERROR")
                     continue
             else:
                 # Process one chromosome at a time
@@ -1084,7 +1149,7 @@ def main():
                 chroms_cmd = f"bcftools query -f '%CHROM\\n' {per_sample_vcfs[0]} | sort | uniq"
                 success, chroms_output = run(chroms_cmd)
                 if not success or not chroms_output:
-                    log(f"Failed to get chromosomes from VCF", "ERROR")
+                    log("Failed to get chromosomes from VCF", "ERROR")
                     continue
                 
                 chromosomes = chroms_output.strip().split('\n')
@@ -1152,21 +1217,21 @@ def main():
                 if chrom_mhs_files:
                     concat_cmd = f"cat {' '.join(chrom_mhs_files)} > {multihetsep_out}"
                     if not run(concat_cmd)[0]:
-                        log(f"Failed to concatenate chromosome multihetsep files", "ERROR")
+                        log("Failed to concatenate chromosome multihetsep files", "ERROR")
                     else:
                         log(f"Successfully generated multihetsep file: {multihetsep_out}")
                     
                     # Clean up temporary files
                     if run(f"rm -rf {tmp_dir}")[0]:
-                        log(f"Cleaned up temporary files")
+                        log("Cleaned up temporary files")
                 else:
                     # If processing by chromosome failed, try processing whole VCF at once as fallback
-                    log(f"No chromosome multihetsep files were generated, trying without chromosome splitting", "WARNING")
+                    log("No chromosome multihetsep files were generated, trying without chromosome splitting", "WARNING")
                     mhs_cmd = f"python3 {gen_mhs_script} --mask={final_mask} " + " ".join(per_sample_vcfs) + f" > {multihetsep_out}"
                     if run(mhs_cmd)[0]:
                         log(f"Successfully generated multihetsep file using whole-VCF method: {multihetsep_out}")
                     else:
-                        log(f"Failed to generate multihetsep file", "ERROR")
+                        log("Failed to generate multihetsep file", "ERROR")
                         continue
         
         # 8. Create subset if requested
@@ -1193,7 +1258,7 @@ def main():
             check_cmd = f"head -n 10 {multihetsep_out}"
             run(check_cmd)
         else:
-            log(f"Cannot perform quality check - Multihetsep file not found", "WARNING")
+            log(f"Cannot perform quality check - Multihetsep file not found", "WARNING")  # noqa: F541
         
         log(f"Finished eSMC2 preparation for cohort: {cohort_name}")
     
@@ -1209,6 +1274,5 @@ def main():
     log(f"Pipeline completed at: {end_time}")
     
     return 0
-
 if __name__ == "__main__":
     sys.exit(main())

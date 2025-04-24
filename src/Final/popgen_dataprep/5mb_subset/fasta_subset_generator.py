@@ -140,10 +140,10 @@ class FastaSubsetGenerator:
         """
         # Default input files if nothing specified
         default_files = {
-            "HT": "/data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Hexaplex_ONT_FLYE/assembly.fasta",
-            "BB": "/data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Bolinus_Captus/assembly__captus-asm/01_assembly/assembly.fasta",
-            "HT2": "/data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Hexaplex_Captus/02_assemblies/SRR28865916__captus-asm/01_assembly/assembly.fasta"
-        }
+    "HT": "/data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Hexaplex_ONT_FLYE/Polished_assembly/Final/Hexaplex_assembly_ONT_FLYE_polished.fasta",
+    "BB": "/data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Bolinus_Captus/SRR28863561__captus-asm/01_assembly/assembly.fasta",
+    "HT2": "/data/proj2/home/students/m.borgmann/Master_thesis/data/processed/assemblies/Hexaplex_Captus/02_assemblies/SRR28865916__captus-asm/01_assembly/assembly.fasta"
+}
         
         # Check if config file is provided
         if self.args.config and os.path.exists(self.args.config):
