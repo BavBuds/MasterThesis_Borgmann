@@ -93,6 +93,12 @@ class PSMCPipeline:
                             help="Extra options for psmc_plot.pl (e.g. -p for log-scaled x-axis)")
         parser.add_argument("--y_scale", type=int, default=50000,
                             help="Default Y-axis scale for the plot (pY parameter)")
+        parser.add_argument("--x_min", type=float, default=0.1,
+                            help="Lower limit for x-axis in time (psmc_plot.pl -L parameter)")
+        parser.add_argument("--x_max", type=float, default=10000,
+                            help="Upper limit for x-axis in time (psmc_plot.pl -U parameter)")
+        parser.add_argument("--y_max", type=int, default=150,
+                            help="Upper limit for y-axis in Ne*10000 (psmc_plot.pl -Y parameter)")
         parser.add_argument("--mode", choices=["full", "prepare", "analysis"], default="full",
                             help="Run mode: 'full' for complete pipeline, 'prepare' for input only, 'analysis' for PSMC only")
         parser.add_argument("--skip_plotting", action="store_true",
@@ -199,6 +205,62 @@ class PSMCPipeline:
                 self.logger.error(f"stderr: {e.stderr.strip()}")
             return False
 
+    def change_plot_color_to_blue(self, eps_file):
+        """Change red colors to blue while preserving transparency/intensity patterns."""
+        self.logger.info(f"Changing red to blue while preserving style: {eps_file}")
+        
+        try:
+            # Read the file content
+            with open(eps_file, 'r') as f:
+                content = f.read()
+            
+            # Replace main line color definition (solid red to solid blue)
+            content = content.replace('/LC0 {1 0 0} def', '/LC0 {0 0 1} def')
+            
+            # For bootstrap lines, we need to preserve the pattern but change red to blue
+            # Pattern: Lines use varying levels of red with same level of opacity
+            
+            # Replace all direct red color commands with blue
+            content = content.replace('1 0 0 setrgbcolor', '0 0 1 setrgbcolor')
+            
+            # Create a regex pattern that matches red colors with varying opacity
+            # This will catch patterns like "1 0.8 0.8" and replace with "0.8 0.8 1"
+            import re
+            
+            # This pattern looks for:
+            # - A value close to 1 for red
+            # - Two equal values that are less than red for green and blue
+            def light_red_to_light_blue(match):
+                full_match = match.group(0)
+                # Check if this is a light red pattern (R is high, G=B are lower and equal)
+                parts = full_match.split()
+                if len(parts) == 3:
+                    try:
+                        r, g, b = float(parts[0]), float(parts[1]), float(parts[2])
+                        # If this looks like a light red color (r close to 1, g=b < r)
+                        if r > 0.9 and abs(g - b) < 0.01 and g < r:
+                            # Convert to equivalent light blue (keep same saturation level)
+                            saturation = 1.0 - g  # How much red was added
+                            blue = 1.0
+                            green_blue = 1.0 - saturation
+                            return f"{green_blue} {green_blue} {blue}"
+                    except ValueError:
+                        pass
+                return full_match
+            
+            # Apply the replacement for light red patterns
+            content = re.sub(r'(\d+\.\d+|\d+) (\d+\.\d+|\d+) (\d+\.\d+|\d+)', light_red_to_light_blue, content)
+            
+            # Write modified content back
+            with open(eps_file, 'w') as f:
+                f.write(content)
+            
+            self.logger.info(f"Successfully changed colors to blue in {eps_file}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to change plot color: {e}")
+            return False
+
     def vcf_to_psmcfa(self, sample):
         """
         1) bcftools consensus --> IUPAC-coded FASTA
@@ -208,7 +270,7 @@ class PSMCPipeline:
         sample_dir = os.path.join(self.args.output_dir, sample)
         os.makedirs(sample_dir, exist_ok=True)
 
-        input_vcf = os.path.join(self.args.input_dir, sample, f"{sample}_filtered.vcf.gz")
+        input_vcf = os.path.join(self.args.input_dir, sample, f"{sample}_filtered_capped.vcf.gz")
         ref_fa    = os.path.join(self.args.ref_dir, "Input_fastas", sample, f"{sample}_assembly_5mb_subset.fasta")
         iupac_fa  = os.path.join(sample_dir, f"{sample}_iupac.fa")
         psmcfa_file = os.path.join(sample_dir, f"{sample}.psmcfa")
@@ -356,7 +418,7 @@ class PSMCPipeline:
     def _auto_scale_psmc(self, psmc_file):
         """
         Parse TR/RS lines from .psmc to find maximum Ne,
-        and pick a Y scale based on the data. Also clamp it if it’s huge.
+        and pick a Y scale based on the data. Also clamp it if it's huge.
         """
         bin_size = 100
         mu       = self.args.mutation_rate
@@ -383,33 +445,35 @@ class PSMCPipeline:
                                 max_lambda = lam
         except Exception as e:
             self.logger.warning(f"auto_scale parse error: {e}")
-            return self.args.y_scale
+            return self.args.y_max  # Use y_max instead of y_scale for default now
 
         if not theta0 or theta0 <= 0:
-            self.logger.warning("No valid theta0 found; using user y_scale.")
-            return self.args.y_scale
+            self.logger.warning("No valid theta0 found; using user y_max.")
+            return self.args.y_max
         
         # Calculate N0 = theta0 / (4 * mu) / bin_size
         N0    = (theta0 / (4.0 * mu)) / bin_size
         max_N = N0 * max_lambda
 
-        # PSMC’s Y scale is in "1e4" units. For example, if max_N=1e6, that’s Y=100.
+        # PSMC's Y scale is in "1e4" units. For example, if max_N=1e6, that's Y=100.
         # We add ~20% buffer.
         y_auto = max_N / 1e4 * 1.2
         y_auto_int = int(y_auto + 1)
 
-        # Clamp the value if it’s too big.
+        # Clamp the value if it's too big.
         if y_auto_int > 500:
             y_auto_int = 150
         
+        # If user specified a fixed y_max, use that instead of auto-scaled value
+        if self.args.y_max > 0:
+            self.logger.info(f"Using user-specified Y scale: {self.args.y_max} (auto-scale would be {y_auto_int})")
+            return self.args.y_max
+            
         self.logger.info(f"Auto-chosen Y scale: {y_auto_int} (N0={N0:.2f}, max_lambda={max_lambda:.2f})")
         return y_auto_int
 
-    # ----------------------------------------------------------------
-    # UPDATED PLOT FUNCTION
-    # ----------------------------------------------------------------
     def plot_results(self, sample, combined_file):
-        """Generate PSMC plots (PDF/EPS only)."""
+        """Generate PSMC plots (PDF/EPS only) with axis scaling options."""
         if self.args.skip_plotting:
             self.logger.info(f"Plotting skipped for {sample}")
             return True, []
@@ -425,18 +489,19 @@ class PSMCPipeline:
             self.logger.info(f"Plot files exist, skipping: {', '.join(existing_plots)}")
             return True, existing_plots
 
-        # Auto-scale Y
-        y_auto = self._auto_scale_psmc(combined_file)
-        final_y = y_auto
+        # Get Y scale (use fixed value from args or auto-scale)
+        y_scale = self.args.y_max if self.args.y_max > 0 else self._auto_scale_psmc(combined_file)
 
-        self.logger.info(f"Plotting with Y scale = {final_y}")
+        self.logger.info(f"Plotting with axis limits: X=({self.args.x_min}-{self.args.x_max}), Y=({y_scale})")
         
-        # Invoke psmc_plot.pl
+        # Invoke psmc_plot.pl with axis limits
         plot_cmd = (
             f"psmc_plot.pl "
             f"-u {self.args.mutation_rate} "
             f"-g {self.args.generation_time} "
-            f"-Y{final_y} "
+            f"-Y{y_scale} "
+            f"-L{self.args.x_min} "
+            f"-U{self.args.x_max} "
             f"{self.args.plot_options} "
             f"{plot_prefix} {combined_file}"
         )
@@ -444,6 +509,7 @@ class PSMCPipeline:
         success = self.run_command(plot_cmd)
         if not success:
             self.logger.error("psmc_plot command failed")
+            return False, []
         
         # Collect any generated PDF/EPS files that start with the same prefix
         generated_plots = sorted(
@@ -452,12 +518,24 @@ class PSMCPipeline:
         if not generated_plots:
             self.logger.error("No PDF/EPS plots were created!")
             return False, []
+
+        # Change colors in EPS files to blue
+        for plot_file in generated_plots:
+            if plot_file.endswith('.eps'):
+                self.logger.info(f"Changing plot color to blue: {plot_file}")
+                if not self.change_plot_color_to_blue(plot_file):
+                    self.logger.warning(f"Failed to change plot color for {plot_file}")
+                else:
+                    # Regenerate PDF from modified EPS if needed
+                    pdf_file = plot_file.replace('.eps', '.pdf')
+                    if os.path.exists(pdf_file):
+                        self.logger.info(f"Regenerating PDF with blue colors: {pdf_file}")
+                        self.run_command(f"epstopdf {plot_file} --outfile={pdf_file}")
         
         for gp in generated_plots:
             self.logger.info(f"Plot generated: {gp}")
         
         return True, generated_plots
-    # ----------------------------------------------------------------
 
     def process_sample(self, sample):
         """Complete workflow for one sample."""
@@ -564,6 +642,7 @@ class PSMCPipeline:
         self.logger.info(f"Mode: {self.args.mode}")
         self.logger.info(f"Samples: {', '.join(self.args.samples)}")
         self.logger.info(f"Mutation rate: {self.args.mutation_rate}, Generation time: {self.args.generation_time}")
+        self.logger.info(f"Axis limits: X=({self.args.x_min}-{self.args.x_max}), Y max={self.args.y_max}")
 
         results = []
         for sample in self.args.samples:
