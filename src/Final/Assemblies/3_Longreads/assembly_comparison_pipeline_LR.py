@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Long-read Assembly Pipeline (FLYE vs CANU)
+Long-read Assembly Pipeline (FLYE vs CANU) for ONT data only
 with BUSCO (mollusca_odb10 & eukaryota_odb10) and GC% via seqkit.
 Includes robust resume functionality to continue from interrupted runs.
 
@@ -9,10 +9,8 @@ Date: 03.04.2025
 
 Steps:
  1. For each sample:
-    A) Run FLYE for PacBio HiFi
-    B) Run FLYE for ONT
-    C) Run CANU for PacBio HiFi
-    D) Run CANU for ONT
+    A) Run FLYE for ONT
+    B) Run CANU for ONT
  2. After each assembly, run BUSCO *twice*:
     - with mollusca_odb10
     - with eukaryota_odb10
@@ -97,7 +95,7 @@ def read_state(output_dir):
         "sample_name": {
             "last_update": "timestamp",
             "assemblers": {
-                "FLYE_pacbio-hifi": {
+                "FLYE_nano-raw": {
                     "assembly": {"status": "completed", "path": "...", "hash": "..."},
                     "busco_mollusca": {"status": "completed", "path": "...", "result": {...}},
                     "busco_eukaryota": {"status": "completed", "path": "...", "result": {...}},
@@ -116,7 +114,7 @@ def read_state(output_dir):
         with open(state_path, 'r') as f:
             return json.load(f)
     except (json.JSONDecodeError, FileNotFoundError):
-        logger.warning(f"State file corrupted or not found. Starting fresh state.")
+        logger.warning("State file corrupted or not found. Starting fresh state.")
         return {}
 
 def write_state(state, output_dir):
@@ -141,7 +139,7 @@ def update_state(output_dir, sample, assembler, config, step, status, **kwargs):
         output_dir: Output directory containing the state file
         sample: Sample name
         assembler: Assembler name (FLYE, CANU)
-        config: Configuration (pacbio-hifi, nano-raw, etc.)
+        config: Configuration (nano-raw, nano-hq, nano-corr)
         step: Step name (assembly, busco_mollusca, busco_eukaryota, gc)
         status: Status of the step (completed, failed)
         **kwargs: Additional data to store (path, hash, result, value, etc.)
@@ -207,11 +205,30 @@ def get_completed_step_data(output_dir, sample, assembler, config, step):
 # --------------------------------------------------------------------
 # 3. Utility: run commands, parse JSON, get seqkit stats
 # --------------------------------------------------------------------
-def run_cmd(cmd, cwd=None, desc=None):
-    """Run a shell command with logging."""
+def run_cmd(cmd, cwd=None, desc=None, timeout=None):
+    """
+    Run a shell command with logging and optional timeout.
+    
+    Args:
+        cmd: Command to run
+        cwd: Working directory
+        desc: Description for logging
+        timeout: Timeout in seconds (None for no timeout)
+        
+    Returns:
+        Tuple of (success, output)
+    """
     if desc:
         logger.info(f"🔧 {desc}")
     logger.info(f"Running: {cmd}")
+    
+    # If timeout is provided, prepend the timeout command
+    if timeout:
+        # Convert timeout to hours for better readability in logs
+        timeout_hrs = timeout / 3600
+        logger.info(f"Setting timeout: {timeout_hrs:.1f} hours")
+        cmd = f"timeout {timeout}s {cmd}"
+    
     try:
         result = subprocess.run(cmd, shell=True, check=True, cwd=cwd,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -221,11 +238,15 @@ def run_cmd(cmd, cwd=None, desc=None):
             logger.debug(f"STDERR: {result.stderr.strip()}")
         return True, result.stdout
     except subprocess.CalledProcessError as e:
-        logger.error(f"Command failed: {cmd}")
-        logger.error(f"Return code: {e.returncode}")
-        logger.error(f"STDOUT: {e.stdout}")
-        logger.error(f"STDERR: {e.stderr}")
-        return False, e.stderr
+        if e.returncode == 124:
+            logger.error("Command timed out!")
+            return False, "TIMEOUT"
+        else:
+            logger.error(f"Command failed: {cmd}")
+            logger.error(f"Return code: {e.returncode}")
+            logger.error(f"STDOUT: {e.stdout}")
+            logger.error(f"STDERR: {e.stderr}")
+            return False, e.stderr
 
 def parse_busco_json(json_file):
     """
@@ -243,7 +264,7 @@ def parse_busco_json(json_file):
     with open(json_file, 'r') as f:
         try:
             js = json.load(f)
-        except Exception as e:
+        except json.JSONDecodeError as e:
             logger.error(f"Error loading BUSCO JSON {json_file}: {e}")
             return {}
 
@@ -253,12 +274,12 @@ def parse_busco_json(json_file):
     def to_int(x):
         try:
             return int(x)
-        except:
+        except (ValueError, TypeError):
             return 0
     def to_float(x):
         try:
             return float(x)
-        except:
+        except (ValueError, TypeError):
             return 0.0
 
     data = {}
@@ -322,7 +343,7 @@ def run_flye_assembly(reads, output_dir, sample_name, read_type, genome_size, th
         reads: Path to long read file (FASTQ/FASTA)
         output_dir: Output directory
         sample_name: Sample name prefix
-        read_type: One of "pacbio-hifi", "pacbio-raw", "nano-raw", "nano-hq", "nano-corr"
+        read_type: One of "nano-raw", "nano-hq", "nano-corr"
         genome_size: Approximate genome size (e.g., "50m" for 50 Mbp)
         threads: Number of CPU threads
         polishing_iterations: Number of polishing rounds
@@ -350,8 +371,6 @@ def run_flye_assembly(reads, output_dir, sample_name, read_type, genome_size, th
     
     # Map user-friendly types to Flye parameters
     tech_map = {
-        "pacbio-hifi": "--pacbio-hifi",
-        "pacbio-raw": "--pacbio-raw",
         "nano-raw": "--nano-raw",
         "nano-hq": "--nano-hq",
         "nano-corr": "--nano-corr"
@@ -411,7 +430,7 @@ def run_flye_assembly(reads, output_dir, sample_name, read_type, genome_size, th
 # 5. CANU Assembly
 # --------------------------------------------------------------------
 def run_canu_assembly(reads, output_dir, sample_name, read_type, genome_size, threads=16,
-                      state_dir=None, force=False):
+                      state_dir=None, force=False, timeout_hours=None):
     """
     Run CANU assembler with appropriate parameters based on read type.
     Implements resume functionality.
@@ -420,11 +439,12 @@ def run_canu_assembly(reads, output_dir, sample_name, read_type, genome_size, th
         reads: Path to long read file (FASTQ/FASTA)
         output_dir: Output directory
         sample_name: Sample name prefix
-        read_type: One of "pacbio-hifi", "pacbio-raw", "nanopore-raw", "nanopore-corr"
+        read_type: One of "nanopore-raw", "nanopore-corr"
         genome_size: Approximate genome size (e.g., "50m" for 50 Mbp)
         threads: Number of CPU threads
         state_dir: Directory containing state file for resume functionality
         force: Force re-run even if previously completed
+        timeout_hours: Maximum runtime in hours before terminating (None for no timeout)
     
     Returns:
         Path to final assembly FASTA or None if failed
@@ -447,8 +467,6 @@ def run_canu_assembly(reads, output_dir, sample_name, read_type, genome_size, th
     
     # Map user-friendly types to Canu parameters
     tech_map = {
-        "pacbio-hifi": "-pacbio-hifi",
-        "pacbio-raw": "-pacbio",
         "nanopore-raw": "-nanopore",
         "nanopore-corr": "-nanopore-corrected"
     }
@@ -465,36 +483,49 @@ def run_canu_assembly(reads, output_dir, sample_name, read_type, genome_size, th
     
     # Set some reasonable error rates based on read type
     error_rates = {
-        "pacbio-hifi": "0.01",
-        "pacbio-raw": "0.045",
         "nanopore-raw": "0.15",
         "nanopore-corr": "0.05"
     }
     
-    error_rate = error_rates.get(read_type, "0.045")
+    error_rate = error_rates.get(read_type, "0.15")
     
     # Check if final assembly already exists
     final_asm = os.path.join(canu_dir, f"{sample_name}.contigs.fasta")
     if os.path.exists(final_asm) and os.path.getsize(final_asm) > 0 and not force:
-        logger.info(f"✅ Resuming: Found existing CANU assembly: {final_asm}")
+        logger.info("✅ Resuming: Found existing CANU assembly: " + final_asm)
     else:
-        # Run CANU assembly
-        prefix = os.path.join(canu_dir, sample_name)
+        # Run CANU assembly with timeout if specified
+        timeout_seconds = None
+        if timeout_hours:
+            timeout_seconds = int(timeout_hours * 3600)
+            logger.info(f"Setting CANU timeout to {timeout_hours} hours")
+        
         cmd = (
             f"canu -p {sample_name} -d {canu_dir} {tech_param} {reads} "
             f"genomeSize={genome_size} errorRate={error_rate} "
             f"useGrid=false maxThreads={threads} maxMemory=32g"
         )
-        ok, _ = run_cmd(cmd, desc=f"CANU assembly ({read_type})")
+        
+        ok, output = run_cmd(cmd, 
+                           desc=f"CANU assembly ({read_type})",
+                           timeout=timeout_seconds)
+        
         if not ok:
-            if state_dir:
-                update_state(state_dir, sample_name, assembler, config, "assembly", "failed",
-                             error="canu_assembly_failed")
+            # Check if it was a timeout
+            if output == "TIMEOUT":
+                logger.error(f"CANU assembly timed out after {timeout_hours} hours")
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed",
+                                error="canu_assembly_timeout")
+            else:
+                if state_dir:
+                    update_state(state_dir, sample_name, assembler, config, "assembly", "failed",
+                                error="canu_assembly_failed")
             return None
     
         # Check for final assembly file
         if not os.path.exists(final_asm):
-            logger.error(f"CANU final assembly not found: {final_asm}")
+            logger.error("CANU final assembly not found: " + final_asm)
             if state_dir:
                 update_state(state_dir, sample_name, assembler, config, "assembly", "failed",
                              error="canu_missing_assembly")
@@ -639,7 +670,7 @@ def collect_results_from_state(output_dir):
             continue
         
         for asm_key, asm_data in sample_data["assemblers"].items():
-            # Parse assembler and config from asm_key (e.g., "FLYE_pacbio-hifi")
+            # Parse assembler and config from asm_key (e.g., "FLYE_nano-raw")
             parts = asm_key.split("_", 1)
             if len(parts) < 2:
                 continue
@@ -754,8 +785,10 @@ def main():
     parser.add_argument("-o", "--output_dir", default="Longread_Assembly_Comparison", help="Output directory")
     parser.add_argument("-t", "--threads", type=int, default=16, help="Number of CPU threads")
     parser.add_argument("-g", "--genome_size", required=True, help="Approximate genome size (e.g., '50m' for 50 Mbp)")
-    parser.add_argument("--tech", default="pacbio-hifi", choices=["pacbio-hifi", "pacbio-raw", "nano-raw", "nano-hq", "nano-corr"], 
+    parser.add_argument("--tech", default="nano-raw", choices=["nano-raw", "nano-hq", "nano-corr"], 
                         help="Long read technology type")
+    parser.add_argument("--canu-timeout", type=float, default=None, 
+                        help="Maximum runtime for CANU in hours (e.g., 48 for 48 hours)")
     parser.add_argument("--clean-after", action="store_true", help="Delete intermediate build folders after completion")
     parser.add_argument("--force", action="store_true", help="Force re-run all steps, ignoring previous results")
     parser.add_argument("--force-assembly", action="store_true", help="Force re-run assembly steps only")
@@ -766,12 +799,14 @@ def main():
     args = parser.parse_args()
 
     log_fp = setup_logging(args.output_dir)
-    logger.info(f"=== Long-read Assembly Pipeline: FLYE + CANU ===")
+    logger.info("=== Long-read Assembly Pipeline: FLYE + CANU ===")
     logger.info(f"Input dir: {args.input_dir}")
     logger.info(f"Output dir: {args.output_dir}")
     logger.info(f"Technology: {args.tech}")
     logger.info(f"Genome size: {args.genome_size}")
     logger.info(f"Threads: {args.threads}")
+    if args.canu_timeout:
+        logger.info(f"CANU timeout: {args.canu_timeout} hours")
     logger.info(f"Logs -> {log_fp}")
     
     # Reset state if requested
@@ -845,8 +880,6 @@ def main():
 
     # Map FLYE read type to CANU read type
     flye_to_canu_map = {
-        "pacbio-hifi": "pacbio-hifi",
-        "pacbio-raw": "pacbio-raw",
         "nano-raw": "nanopore-raw",
         "nano-hq": "nanopore-raw",  # Use raw for HQ nanopore reads
         "nano-corr": "nanopore-corr"
@@ -946,7 +979,7 @@ def main():
             logger.info(f"✅ Skipping FLYE {flye_config} for {sample_name} (already completed)")
         
         # CANU assembly
-        canu_config = flye_to_canu_map.get(args.tech, "pacbio-hifi")
+        canu_config = flye_to_canu_map.get(args.tech, "nanopore-raw")
         config_key = f"{sample_name}_CANU_{canu_config}"
         
         if config_key not in completed_configs or force_assembly:
@@ -958,7 +991,8 @@ def main():
                 genome_size=args.genome_size,
                 threads=args.threads,
                 state_dir=args.output_dir,
-                force=force_assembly
+                force=force_assembly,
+                timeout_hours=args.canu_timeout
             )
             
             if canu_asm:
@@ -1023,7 +1057,7 @@ def main():
             for d in cleanup_dirs:
                 if os.path.exists(d):
                     shutil.rmtree(d)
-                    logger.info(f"🧹 Cleaned up temp folder: {d}")
+                    logger.info("🧹 Cleaned up temp folder: " + d)
     
     logger.info("Pipeline complete.")
 

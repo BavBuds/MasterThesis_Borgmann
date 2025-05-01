@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# eSMC2 preparation pipeline – full script with interval-based region selection
+# eSMC2 preparation pipeline – full script with interval-based region selection and QC filtering
 # -------------------------------------------------------------------
 # Copyright 2024-2025 – M. Borgmann & contributors
 # -------------------------------------------------------------------
@@ -13,6 +13,7 @@ import glob
 import re
 import time
 import json
+import numpy as np
 from datetime import datetime
 
 # ────────────────────────────────────────────────────────────────────
@@ -130,6 +131,32 @@ def run_haplotypecaller(sample_name: str,
         index_vcf(out_gvcf, threads)
     return ok
 
+# ────────────────────────────────────────────────────────────────────
+# NEW ─ QC filtering helpers
+# ────────────────────────────────────────────────────────────────────
+def calculate_median_depth(vcf_path: str) -> int:
+    """
+    Calculate median depth from a VCF file's DP values.
+    Returns the median depth as an integer.
+    """
+    log(f"Calculating median depth for {vcf_path}", "INFO")
+    cmd = f"bcftools query -f '%INFO/DP\n' {vcf_path} 2>/dev/null | sort -n"
+    success, output = run(cmd)
+    if not success or not output:
+        log(f"Failed to extract depth values from {vcf_path}", "ERROR")
+        return 30  # Default fallback median depth
+        
+    # Filter out missing values (represented as ".")
+    depths = [int(line) for line in output.strip().split('\n') 
+              if line.strip() and line.strip() != '.']
+    
+    if not depths:
+        log(f"No valid depth values found in {vcf_path}", "WARNING")
+        return 30  # Default fallback median depth
+        
+    median_depth = int(np.median(depths))
+    log(f"Median depth: {median_depth}×", "INFO")
+    return median_depth
 
 
 # --------------------------------------------------------------------
@@ -182,6 +209,10 @@ def parse_args():
     # ── depth / call options
     parser.add_argument("--depth-filter", type=int, default=10,
                         help="Minimum depth filter (default: 10)")
+    parser.add_argument("--qual-filter", type=int, default=30,
+                        help="Minimum QUAL filter (default: 30)")
+    parser.add_argument("--depth-cap-factor", type=float, default=3.0,
+                        help="Depth cap factor (multiplied by median depth, default: 3.0)")
     # ── NEW: use one *common* reference for HaplotypeCaller
     parser.add_argument("--common-reference",
                         help="Full reference FASTA containing **all** contigs that appear in BAM headers. "
@@ -785,6 +816,8 @@ def main() -> int:
     log(f"Threads             : {args.threads}")
     log(f"Memory (Java)       : {args.memory}")
     log(f"Depth filter        : {args.depth_filter}")
+    log(f"Quality filter      : {args.qual_filter}")
+    log(f"Depth cap factor    : {args.depth_cap_factor}× median")
 
     if args.create_subset:
         log(f"Will subset Multihetsep: {args.subset_start}–{args.subset_end}")
@@ -1004,13 +1037,21 @@ def main() -> int:
                 log(f"GenotypeGVCFs failed for {cohort_name}", "ERROR")
                 continue
 
-        # SNP-only
+        # Calculate median depth from the VCF
+        log(f"Calculating median depth for {cohort_name}", "INFO")
+        median_depth = calculate_median_depth(allsites)
+        depth_cap = int(median_depth * args.depth_cap_factor)
+        log(f"Median depth for {cohort_name}: {median_depth}×", "INFO")
+        log(f"Depth cap (3× median): {depth_cap}×", "INFO")
+
+        # SNP-only with depth and quality filtering
         final_vcf = os.path.join(cohort_dir, f"{cohort_name}.final.filtered.vcf.gz")
         if not os.path.exists(final_vcf):
             cmd = (
                 f'bcftools view {allsites} '
                 f'--genotype ^miss --apply-filters .,PASS '
-                f'--include \'TYPE="snp"\' -Oz -o {final_vcf}'
+                f'--include \'TYPE="snp" && QUAL>={args.qual_filter} && '
+                f'INFO/DP>={args.depth_filter} && INFO/DP<={depth_cap}\' -Oz -o {final_vcf}'
             )
             if run(cmd)[0]:
                 index_vcf(final_vcf, args.threads)

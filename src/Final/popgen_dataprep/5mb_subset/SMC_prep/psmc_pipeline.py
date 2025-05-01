@@ -81,7 +81,7 @@ class PSMCPipeline:
                             help="Minimum quality score for filtering")
         parser.add_argument("--generation_time", type=float, default=1.0,
                             help="Generation time in years for the species")
-        parser.add_argument("--mutation_rate", type=float, default=0.9e-8,
+        parser.add_argument("--mutation_rate", type=float, default=8.6e-9,
                             help="Mutation rate per base per generation")
         parser.add_argument("--psmc_n", type=int, default=25,
                             help="PSMC -N parameter (number of iterations)")
